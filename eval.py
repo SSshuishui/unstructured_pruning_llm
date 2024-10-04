@@ -8,7 +8,7 @@ import fnmatch
 
 
 @torch.no_grad()
-def llama_eval(args, model, testenc, dev,  dataset: str):
+def llama_eval(args, model, testenc, dev,  dataset: str, logger):
     logger.info("Evaluating ...")
 
     testenc = testenc.input_ids
@@ -54,7 +54,7 @@ def llama_eval(args, model, testenc, dev,  dataset: str):
 
     outs = torch.zeros_like(inps)
     attention_mask = cache["attention_mask"]
-    attention_mask = cache["position_ids"]
+    position_ids = cache["position_ids"]
 
     hf_device_map = model.hf_device_map
     logger.info(hf_device_map)
@@ -108,34 +108,6 @@ def llama_eval(args, model, testenc, dev,  dataset: str):
     model.config.use_cache = use_cache
 
 
-def eval_zero_shot(model_name, model, tokenizer, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
-        num_fewshot=0, add_special_tokens=False):
-    
-    from lm_eval import tasks, evaluator 
-    def pattern_match(patterns, source_list):
-        task_names = set()
-        for pattern in patterns:
-            for matching in fnmatch.filter(source_list, pattern):
-                task_names.add(matching)
-        return list(task_names)
-    task_names = pattern_match(task_list, tasks.ALL_TASKS)
-    model_args = f"pretrained={model_name}, cache_dir=./llm_weights"
-    limit = None 
-    results = evaluator.simple_evaluate(
-        model="hf-causal-experimental",
-        model_args=model_args,
-        tasks=task_names,
-        num_fewshot=num_fewshot,
-        batch_size=None,
-        device=None,
-        no_cache=True,
-        limit=limit,
-        description_dict={},
-        decontamination_ngrams_path=None,
-        check_integrity=False,
-        pretrained_model=model,
-        tokenizer=tokenizer, 
-        add_special_tokens=add_special_tokens
-    )
-
-    return results 
+def eval_zero_shot(model_name, model, logger, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
+        num_fewshot=0,  add_special_tokens=False): 
+    pass

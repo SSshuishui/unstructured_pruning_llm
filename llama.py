@@ -1,13 +1,13 @@
 import time
-
 import torch
 import torch.nn as nn
 import argparse
 from pathlib import Path
 
 from utils.logutils import create_logger
-from utils.datautils import *
+from utils.datautils import get_loaders
 from utils.modelutils import *
+
 
 def get_llama(model):    
     import torch
@@ -22,7 +22,7 @@ def get_llama(model):
     return model
 
 
-def llama_sequential_magnitude(args, model, dataloader, dev):
+def llama_sequential_magnitude(args, model, dataloader, dev, logger):
     logger.info("Starting...")
 
     layers = model.model.layers 
@@ -35,12 +35,12 @@ def llama_sequential_magnitude(args, model, dataloader, dev):
         for name in subset:
             W = subset[name].weight.data 
             W_metric = torch.abs(W)
-            if prune_n != 0:
+            if args.prune_n != 0:
                 W_mask = (torch.zeros_like(W)==1)
                 for ii in range(W_metric.shape[1]):
-                    if ii % prune_m == 0:
-                        tmp = W_metric[:,ii:(ii+prune_m)].float()
-                        W_mask.scatter_(1,ii+torch.topk(tmp, prune_n,dim=1, largest=False)[1], True)
+                    if ii % args.prune_m == 0:
+                        tmp = W_metric[:,ii:(ii+args.prune_m)].float()
+                        W_mask.scatter_(1,ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
             else:
                 thresh = torch.sort(W_metric.flatten().cuda())[0][int(W.numel()*args.sparsity_ratio)].cpu()
                 W_mask = (W_metric<=thresh)
@@ -48,7 +48,7 @@ def llama_sequential_magnitude(args, model, dataloader, dev):
             W[W_mask] = 0
 
 @torch.no_grad()
-def llama_sequential_sparsegpt(args,model, dataloader, dev):
+def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
     logger.info("Starting...")
 
     use_cache = model.config.use_cache
@@ -145,25 +145,25 @@ def llama_sequential_sparsegpt(args,model, dataloader, dev):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
             for h in handles:
                 h.remove()
 
             for name in subset:
-                logger.info(i, name)
+                print(i, name)
                 logger.info("Pruning ...")
                 sparsity = args.sparsity_ratio
                 gpts[name].fasterprune(
                     sparsity,
-                    prunen=args.prunen,
-                    prunem=args.prunem,
+                    prunen=args.prune_n,
+                    prunem=args.prune_m,
                     percdamp=args.percdamp,
                     blocksize=args.blocksize,
                 )
                 gpts[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -177,7 +177,7 @@ def llama_sequential_sparsegpt(args,model, dataloader, dev):
     return quantizers
 
 
-def llama_sequential_wanda(args, model, dataloader, dev):
+def llama_sequential_wanda(args, model, dataloader, dev, logger):
     logger.info("Starting...")
 
     use_cache = model.config.use_cache 
@@ -256,16 +256,17 @@ def llama_sequential_wanda(args, model, dataloader, dev):
             h.remove()
 
         for name in subset:
-            logger.info(f"pruning layer {i} name {name}")
+            print(i, name)
+            logger.info("Pruning ...")
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wanda_layers[name].scaler_row.reshape((1,-1)))
 
             W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
-            if prune_n != 0:
+            if args.prune_n != 0:
                 # structured n:m sparsity
                 for ii in range(W_metric.shape[1]):
-                    if ii % prune_m == 0:
-                        tmp = W_metric[:,ii:(ii+prune_m)].float()
-                        W_mask.scatter_(1,ii+torch.topk(tmp, prune_n,dim=1, largest=False)[1], True)
+                    if ii % args.prune_m == 0:
+                        tmp = W_metric[:,ii:(ii+args.prune_m)].float()
+                        W_mask.scatter_(1,ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
             else:
                 sort_res = torch.sort(W_metric, dim=-1, stable=True)
 
@@ -304,9 +305,7 @@ def llama_sequential_wanda(args, model, dataloader, dev):
     torch.cuda.empty_cache()
 
 
-
-
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -346,13 +345,13 @@ def main():
         "--wbits", type=int, default=16, help="Whether to quantize as well."
     )
     parser.add_argument(
-        "--minlayer", type=int, default=-1, help="Prune all layers with id >= this."
+        "--minlayer", type=int, default=-1, help="prunellm all layers with id >= this."
     )
     parser.add_argument(
-        "--maxlayer", type=int, default=1000, help="Prune all layers with id < this."
+        "--maxlayer", type=int, default=1000, help="prunellm all layers with id < this."
     )
     parser.add_argument(
-        "--prune_only", type=str, default="", help="Prune only layers that contain this text.",
+        "--prune_only", type=str, default="", help="prunellm only layers that contain this text.",
     )
     parser.add_argument(
         "--invert", action="store_true", help="Invert subset."
@@ -375,7 +374,7 @@ def main():
 
     args = parser.parse_args()
 
-    args.log_dir = f"{args.log_dir}/{args.method}-{args.model.split('/')[-1]}"
+    args.log_dir = f"{args.log_dir}/{args.prune_method}-{args.model.split('/')[-1]}"
     if args.log_dir:
         Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     log_dir = Path(args.log_dir)
@@ -383,7 +382,6 @@ def main():
     logger.info(args)
 
     # Setting seeds for reproducibility
-    np.random.seed(args.seed)
     torch.random.manual_seed(args.seed)
 
     args.prune_n, args.prune_m = 0, 0
@@ -404,73 +402,70 @@ def main():
         from eval import llama_eval
 
         tick = time.time()
-        llama_sequential_magnitude(args, model, dataloader, DEV)
-        logger.info(time.time() - tick)
+        llama_sequential_magnitude(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
 
         for dataset in ["wikitext2", "ptb", "c4"]:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
             logger.info("Dataset:", dataset)
-            llama_eval(model, testloader, DEV, dataset, args.log_wandb)
+            llama_eval(model, testloader, DEV, dataset, logger)
 
         if args.save_model:
             model.save_pretrained(args.save_model)
 
     if args.prune_method == "sparsegpt":
-        from prune.sparsegpt import *
-        from prune.quant import *
+        from prunellm.sparsegpt import SparseGPT
+        from prunellm.quant import Quantizer
         from eval import llama_eval
 
-        logger.info("Pruning...") 
+        logger.info("Pruning SparseGPT...") 
         tick = time.time()
-        llama_sequential_sparsegpt(args, model, dataloader, DEV)
+        llama_sequential_sparsegpt(args, model, dataloader, DEV, logger)
         for n, p in model.named_parameters():
-            logger.info(n, torch.mean((p == 0).float()))
+            print(n, torch.mean((p == 0).float()))
             if 'down_proj' in n:
                 break
-        logger.info(time.time() - tick)
+        logger.info(f"Total time: {time.time() - tick}")
         
         logger.info("PPL Evaluation") 
         for dataset in ["wikitext2", "ptb", "c4"]:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
-            logger.info("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset)
+            logger.info(f"Dataset: {dataset}")
+            llama_eval(args, model, testloader, DEV, dataset, logger)
 
         if args.save_model:
             model.save_pretrained(args.save_model)
 
     if args.prune_method == "wanda":
-        from prune.wanda import *
+        from prunellm.wanda import WandaGPT
         from eval import llama_eval
 
-        logger.info("Pruning...") 
+        logger.info("Pruning Wanda ...") 
         tick = time.time()
-        llama_sequential_wanda(args, model, dataloader, DEV)
-        logger.info(time.time() - tick)
+        llama_sequential_wanda(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            logger.info("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset) 
+        # for dataset in ["wikitext2", "ptb", "c4"]:
+        #     dataloader, testloader = get_loaders(
+        #         dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+        #     )
+        #     logger.info("Dataset:", dataset)
+        #     llama_eval(args, model, testloader, DEV, dataset, logger) 
         
         if args.eval_zero_shot:
             from eval import eval_zero_shot
+            from transformers import AutoTokenizer
             
             task_list = ["boolq", "rte", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
             num_shot = 0
-            tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
-            results = eval_zero_shot(args.model, model, tokenizer, task_list, num_shot)
+            results = eval_zero_shot(args.model, model, logger, task_list, num_shot)
             logger.info("zero_shot evaluation")
             logger.info(results)
 
         if args.save_model:    
             model.save_pretrained(args.save_model)
-
-if __name__ == "__main__":
-    main()
