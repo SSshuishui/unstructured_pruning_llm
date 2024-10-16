@@ -110,4 +110,21 @@ def llama_eval(args, model, testenc, dev,  dataset: str, logger):
 
 def eval_zero_shot(model_name, model, logger, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
         num_fewshot=0,  add_special_tokens=False): 
-    pass
+    import lm_eval
+    from lm_eval import utils as lm_eval_utils
+    from lm_eval.api.registry import ALL_TASKS
+    from lm_eval.models.huggingface import HFLM
+
+    model.to(DEV)
+    
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+    hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
+
+    task_names = lm_eval_utils.pattern_match(task_list, ALL_TASKS)
+    results = lm_eval.simple_evaluate(hflm, tasks=task_names, batch_size=args.lm_eval_batch_size)['results']
+
+    metric_vals = {task: round(result.get('acc_norm,none', result['acc,none']), 4) for task, result in results.items()}
+    metric_vals['acc_avg'] = round(sum(metric_vals.values()) / len(metric_vals.values()), 4)
+    logger.info(metric_vals)
+    
+    return results

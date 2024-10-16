@@ -75,3 +75,11 @@ python llama.py \
 --sparsity_type unstructured \
 --save_model save_models/wanda/ 
 ```
+
+## SparseLLM
+```
+python llama_main.py \
+--model /PATH/TO/LLAMA2/ \
+--dataset c4 \
+--sparsity 0.7 \
+```
