@@ -13,9 +13,8 @@ DEBUG = False
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-
 class SparseLLM:
-     def __init__(self, layer):
+    def __init__(self, layer):
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()

@@ -391,7 +391,7 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
             
             def add_batch(name):
                 def tmp(_, inp, out):
-                    gpts[name].add_batch(inp[0].data, out.data)
+                    gpts[name].add_batch(inp[0].data, out.data, name)
 
                 return tmp
 
@@ -419,9 +419,9 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
                 gpts[name].free()
 
             # Adjust hyperparameters as needed
-            alpha = 5.0
-            beta = 5.0
-            gamma = 5.0
+            alpha = 5.0  # 对应全局中的 alpha
+            beta = 5.0  # 对应激活更新， zl更新中的 alpha
+            gamma = 5.0 # 对应权重中的beta，激活更新，zl更新中的 beta
 
             # Define the number of global pruning epochs
             opt_epochs = 8  # This might need to be adjusted
@@ -440,17 +440,17 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
             gpts['mlp.down_proj'].batch_out.clear()
 
             # Get the hidden variables and their initialization
-            # z: output of 'mlp.up_proj'
+            # z: output of 'mlp.up_proj'  对应论文中的z_l
             hidden_z_list = gpts['mlp.up_proj'].batch_out
             z = torch.stack(hidden_z_list, dim=0)
             hidden_z_list = None
             gpts['mlp.up_proj'].batch_out.clear()
-            # p: input of 'mlp.down_proj'
+            # p: input of 'mlp.down_proj'  对应论文中的 a_l
             hidden_p_list = gpts['mlp.down_proj'].batch_inp
             p = torch.stack(hidden_p_list, dim=0)
             hidden_p_list = None
             gpts['mlp.down_proj'].batch_inp.clear()
-            # s: output of 'mlp.gate_proj'
+            # s: output of 'mlp.gate_proj'  对应论文中的 s_l
             hidden_s_list = gpts['mlp.gate_proj'].batch_out
             s = torch.stack(hidden_s_list, dim=0)
             hidden_s_list = None
@@ -537,6 +537,8 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
                 # optimize p
                 ##############
                 # Activation inverse
+                # beta 对应论文中的alpha
+                # gamma 对应论文中的beta
                 next_weight = subset['mlp.down_proj'].weight
                 m1 = beta * torch.matmul(next_weight.T, next_weight)
                 m2 = gamma * torch.eye(m1.shape[0], device=m1.device)

@@ -77,9 +77,24 @@ python llama.py \
 ```
 
 ## SparseLLM
+For unstructured sparsity
 ```
-python llama_main.py \
+python llama.py \
 --model /PATH/TO/LLAMA2/ \
+--prune_method sparsellm \
 --dataset c4 \
---sparsity 0.7 \
+--sparsity_ratio 0.7 \
+--sparsity_type unstructured \
+--save_model save_models/sparsellm/ 
+```
+
+For structured N:M sparsity, "2:4" or "4:8"
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method sparsellm \
+--dataset c4 \
+--sparsity_ratio 0.7 \
+--sparsity_type 2:4 \
+--save_model save_models/sparsellm/ 
 ```
