@@ -77,6 +77,7 @@ python llama.py \
 ```
 
 ## SparseLLM
+* Due to 4090 only have 24G, need to minimize nsamples for running.
 For unstructured sparsity
 ```
 python llama.py \
@@ -85,7 +86,8 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.7 \
 --sparsity_type unstructured \
---save_model save_models/sparsellm/ 
+--save_model save_models/sparsellm/ \
+--nsamples 16
 ```
 
 For structured N:M sparsity, "2:4" or "4:8"
@@ -94,7 +96,8 @@ python llama.py \
 --model /PATH/TO/LLAMA2/ \
 --prune_method sparsellm \
 --dataset c4 \
---sparsity_ratio 0.7 \
+--sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/sparsellm/ 
+--save_model save_models/sparsellm/ \
+--nsamples 16
 ```

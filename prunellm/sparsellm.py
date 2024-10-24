@@ -73,6 +73,7 @@ class SparseLLM:
         tick = time.time()
 
         H = self.H
+        print("H shape", H)
         # del self.H 
         dead = torch.diag(H) == 0
         H[dead, dead] = 1

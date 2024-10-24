@@ -153,9 +153,8 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
             for name in subset:
                 print(i, name)
                 logger.info("Pruning ...")
-                sparsity = args.sparsity_ratio
                 gpts[name].fasterprune(
-                    sparsity,
+                    args.sparsity_ratio,
                     prunen=args.prune_n,
                     prunem=args.prune_m,
                     percdamp=args.percdamp,
@@ -392,7 +391,6 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
             def add_batch(name):
                 def tmp(_, inp, out):
                     gpts[name].add_batch(inp[0].data, out.data, name)
-
                 return tmp
 
             handles = []
@@ -406,17 +404,17 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
             target_layer_names = ["mlp.up_proj", "mlp.gate_proj", "mlp.down_proj"]
 
             for name in subset:
-                print(i, name)
-                logger.info("Pruning ...")
-                sparsity = args.sparsity_ratio
-                gpts[name].fasterprune(
-                    sparsity,
-                    prunen=args.prune_n,
-                    prunem=args.prune_m,
-                    percdamp=args.percdamp,
-                    blocksize=args.blocksize,
-                )
-                gpts[name].free()
+                if name not in target_layer_names:
+                    print(i, name)
+                    logger.info("Pruning ...")
+                    gpts[name].fasterprune(
+                        args.sparsity_ratio,
+                        prunen=args.prune_n,
+                        prunem=args.prune_m,
+                        percdamp=args.percdamp,
+                        blocksize=args.blocksize,
+                    )
+                    gpts[name].free()
 
             # Adjust hyperparameters as needed
             alpha = 5.0  # 对应全局中的 alpha
@@ -523,12 +521,11 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
 
                 for name in target_layer_names:
                     print(i, name)
-                    print('Pruning ...')
-                    sparsity = args.sparsity
+                    print('FFN Pruning ...')
                     gpts[name].fasterprune(
-                        sparsity,
-                        prunen=args.prunen,
-                        prunem=args.prunem,
+                        args.sparsity_ratio,
+                        prunen=args.prune_n,
+                        prunem=args.prune_m,
                         percdamp=args.percdamp,
                         blocksize=args.blocksize,
                     )
@@ -683,9 +680,6 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--true-sequential", action="store_true", help="Whether to run in true sequential model.",
-    )
-    parser.add_argument(
-        "--log_wandb", action="store_true", help="Whether to log to wandb."
     )
     parser.add_argument(
         '--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix"
