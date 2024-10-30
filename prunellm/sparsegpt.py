@@ -35,7 +35,7 @@ class SparseGPT:
             self.out1 = out
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
-        #####
+
         tmp = inp.shape[0]
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
             if len(inp.shape) == 3:
@@ -110,13 +110,14 @@ class SparseGPT:
 
                 q = w.clone()
                 q[mask1[:, i]] = 0
-
                 if hasattr(self, 'quantizer'):
                     q = quantize(
                         q.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
                     ).flatten()
 
                 Q1[:, i] = q
+                
+
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = (w - q) / d

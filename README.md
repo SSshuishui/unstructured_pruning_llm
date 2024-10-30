@@ -101,3 +101,33 @@ python llama.py \
 --save_model save_models/sparsellm/ \
 --nsamples 16
 ```
+
+
+## DSnoT
+For unstructured sparsity
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method DSnoT \
+--dataset c4 \
+--initial_method wanda \
+--sparsity_ratio 0.5 \
+--sparsity_type unstructured \
+--max_cycle_time 50 \
+--update_threshold 0.1 \
+--pow_of_var_regrowing 1
+```
+
+For structured N:M sparsity, "2:4" or "4:8"
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method DSnoT \
+--dataset c4 \
+--initial_method wanda \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
+--max_cycle_time 50 \
+--update_threshold 0.1 \
+--pow_of_var_regrowing 1
+```
