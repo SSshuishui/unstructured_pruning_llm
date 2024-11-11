@@ -117,7 +117,6 @@ class SparseGPT:
 
                 Q1[:, i] = q
                 
-
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = (w - q) / d

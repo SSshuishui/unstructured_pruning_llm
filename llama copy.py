@@ -1114,7 +1114,7 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
             raise ValueError
 
     layers[0] = Catcher(layers[0])
-
+   
     for batch in dataloader:
         try:
             model(batch[0].to(dev))
@@ -1123,6 +1123,9 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
+    # model.model.embed_tokens = model.model.embed_tokens.cpu()
+    # model.model.norm = model.model.norm.cpu()
+    # torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
     attention_mask = cache["attention_mask"]
@@ -1196,6 +1199,8 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
     logger.info('Pruning Starting ...')
     use_cache = model.config.use_cache
     model.config.use_cache = False
+    # model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    # model.model.norm = model.model.norm.to(dev)
 
     layers = model.model.layers
 
@@ -1207,14 +1212,21 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
 
     layers[0] = Catcher(layers[0])
 
+    # 遍历模型的每一层并打印其所在的设备
+    for name, module in model.named_modules():
+        # 获取模块的第一个参数，如果模块有参数的话
+        parameter = next(iter(module.parameters()), None)
+        # 如果模块有参数，打印参数所在的设备
+        if parameter is not None:
+            print(f"Layer {name} is on device: {parameter.device}")
+    print(1111111, dev)
+    print(2222222, model.hf_device_map)
     for batch in dataloader:
         try:
             model(batch[0].to(dev))
         except ValueError:
             pass
     layers[0] = layers[0].module
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -1255,25 +1267,19 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
         for name in gpts:
             print(i, name)
             logger.info('Pruning ...')
-            gpts[name].fasterprune(
-                layer_sparsity_ratio, 
-                prunen=args.prune_n, 
-                prunem=args.prune_m, 
-                percdamp=args.percdamp, 
-                blocksize=args.blocksize
-            )
+
+            gpts[name].fasterprune(layer_sparsity_ratio, prune_n=prune_n, prune_m=prune_m, percdamp=0.01, blocksize=128)
             gpts[name].free()
 
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        layers[i] = layer.cpu()
-        del layer
-        del gpts
+        layers[i] = layer 
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
 
 
 def check_outlier_mean(mask,threshold):
