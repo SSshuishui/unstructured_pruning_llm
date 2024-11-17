@@ -51,6 +51,8 @@ def llama_sequential_magnitude(args, model, dataloader, dev, logger):
 
             W[W_mask] = 0
 
+    torch.cuda.empty_cache()
+
 
 @torch.no_grad()
 def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
@@ -177,6 +179,7 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
 
 
 def llama_sequential_wanda(args, model, dataloader, dev, logger):
@@ -626,6 +629,7 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
 
 
 def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
@@ -1082,6 +1086,7 @@ def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
 
 
 def llama_sequential_owl_magnitude(args, model, dataloader, dev, logger):
@@ -1224,6 +1229,8 @@ def llama_sequential_owl_magnitude(args, model, dataloader, dev, logger):
                 W_mask = (W_metric<=thresh)
 
             W[W_mask] = 0
+
+    torch.cuda.empty_cache()
 
 
 def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
@@ -1417,6 +1424,7 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
 
 
 def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
@@ -1636,7 +1644,7 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
-
+    torch.cuda.empty_cache()
 
 def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
     logger.info("Starting...")
@@ -1837,6 +1845,334 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
+
+
+def llama_sequential_prunerzero(args, model, dataloader, dev, logger, engine=None):
+    logger.info("Starting...")
+
+    # Load gradients
+    with open(args.gradient_path, 'rb') as file:
+        gradients = torch.load(
+            args.gradient_path, map_location=torch.device('cpu'))
+
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    layers = model.model.layers
+
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
+    torch.cuda.empty_cache()
+
+    outs = torch.zeros_like(inps)
+    attention_mask = cache["attention_mask"]
+    position_ids = cache["position_ids"]
+
+    logger.info("Ready.")
+
+    hf_device_map = model.hf_device_map
+    logger.info(hf_device_map)
+
+    for i in range(len(layers)):
+        logger.info(f'================={i}==================')
+        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        layer = layers[i].to(hf_device)
+        inps = inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
+
+        subset = find_layers(layer)
+
+        wrapped_layers = {}
+        for name in subset:
+            wrapped_layers[name] = PrunerZeroGPT(subset[name])
+
+
+        def add_batch(name):
+            def tmp(_, inp, out):
+                wrapped_layers[name].add_batch(inp[0].data, out.data)
+            return tmp
+
+        handles = []
+        for name in subset:
+            handles.append(subset[name].register_forward_hook(add_batch(name)))
+        for j in range(args.nsamples):
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        for h in handles:
+            h.remove()
+
+        for name in subset:
+            print(i, name)
+            logger.info("Pruning ...")
+            
+            indexed_name = f'{name}_layer_{i}'
+            W = torch.abs(subset[name].weight.data)
+            # For inference, change engine forward without X
+            X = wrapped_layers[name].scaler_row.reshape((1,-1))
+            G = gradients[indexed_name]
+
+            W_metric = engine.forward(
+                W.to(dtype=torch.float32),
+                G.to(device=W.device, dtype=torch.float32),
+                X.to(dtype=torch.float32)
+            )
+            assert W_metric is not None
+
+            W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
+            if args.prune_n != 0:
+                # structured n:m sparsity
+                for ii in range(W_metric.shape[1]):
+                    if ii % args.prune_m == 0:
+                        tmp = W_metric[:, ii:(ii+args.prune_m)].float()
+                        W_mask.scatter_(1, ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
+            else:
+                sort_res = torch.sort(W_metric, dim=-1, stable=True)
+
+                if args.use_variant:
+                    # wanda variant 
+                    tmp_metric = torch.cumsum(sort_res[0], dim=1)
+                    sum_before = W_metric.sum(dim=1)
+
+                    alpha = 0.4
+                    alpha_hist = [0., 0.8]
+                    W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                    while (torch.abs(cur_sparsity - args.sparsity_ratio)>0.001) and (alpha_hist[1]-alpha_hist[0]>=0.001):
+                        if cur_sparsity > args.sparsity_ratio:
+                            alpha_new = (alpha + alpha_hist[0]) / 2.0
+                            alpha_hist[1] = alpha
+                        else:
+                            alpha_new = (alpha + alpha_hist[1]) / 2.0
+                            alpha_hist[0] = alpha
+
+                        alpha = alpha_new 
+                        W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                    print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
+                else:
+                    # unstructured pruning
+                    indices = sort_res[1][:, :int(W_metric.shape[1]*args.sparsity_ratio)]
+                    W_mask.scatter_(1, indices, True)
+
+            subset[name].weight.data[W_mask] = 0
+
+        for j in range(args.nsamples):
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+
+        layers[i] = layer.cpu()
+        del layer
+        del wrapped_layers
+        torch.cuda.empty_cache()
+
+        inps, outs = outs, inps
+
+    model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
+
+
+def llama_sequential_gradient(args, model, dataloader, dev, logger):
+    layers = model.model.layers
+    with open(args.gradient_path, 'rb') as file:
+        gradients = torch.load(args.gradient_path, map_location=torch.device('cpu')) 
+    
+    hf_device_map = model.hf_device_map
+    logger.info(hf_device_map)
+
+    for i in range(len(layers)):
+        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        layer = layers[i].to(hf_device)
+        subset = find_layers(layer)
+
+        for name in subset:
+            indexed_name = f"{name}_layer_{i}"
+            W = subset[name].weight.data 
+            W_metric = torch.abs(W)
+            if not args.gradient_inv:
+                W_metric = W_metric.to(dtype=torch.float32) * torch.abs(gradients[indexed_name].to(device=W_metric.device)).to(dtype=torch.float32)#+ small_value)
+            else:
+                small_value = torch.tensor(1e-8, dtype=gradients[indexed_name].dtype, device=gradients[indexed_name].device)
+                gradient_inv = 1 / (torch.abs(gradients[indexed_name]) + small_value)
+                W_metric = W_metric.to(dtype=torch.float32) * gradient_inv.to(device=W_metric.device).to(dtype=torch.float32)
+            W_mask = (torch.zeros_like(W)==1)
+            if args.prune_n != 0:
+                for ii in range(W_metric.shape[1]):
+                    if ii % args.prune_m == 0:
+                        tmp = W_metric[:,ii:(ii+args.prune_m)].float()
+                        W_mask.scatter_(1,ii+torch.topk(tmp, args.prune_n,dim=1, largest=False)[1], True)
+            else:
+                sort_res = torch.sort(W_metric, dim=-1, stable=True)
+                indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
+                W_mask.scatter_(1, indices, True)
+
+            W[W_mask] = 0
+
+
+def llama_sequential_gblm_pruner(args, model, dataloader, dev, logger):
+    with open(args.gradient_path, 'rb') as file:
+        gradients = torch.load(args.gradient_path, map_location=torch.device('cpu')) 
+
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    layers = model.model.layers
+
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
+    torch.cuda.empty_cache()
+
+    outs = torch.zeros_like(inps)
+    attention_mask = cache["attention_mask"]
+    position_ids = cache["position_ids"]
+
+    logger.info("Ready.")
+
+    hf_device_map = model.hf_device_map
+    logger.info(hf_device_map)
+
+    quantizers = {}
+    for i in range(len(layers)):
+        logger.info(f'================={i}==================')
+        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        layer = layers[i].to(hf_device)
+        inps = inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
+
+        subset = find_layers(layer)
+
+        wrapped_layers = {}
+        for name in subset:
+            wrapped_layers[name] = GBLMPrunerGPT(subset[name])
+        
+        def add_batch(name):
+            def tmp(_, inp, out):
+                wrapped_layers[name].add_batch(inp[0].data, out.data)
+            return tmp
+
+        handles = []
+        for name in wrapped_layers:
+            handles.append(subset[name].register_forward_hook(add_batch(name))) ## this is a important function.
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        for h in handles:
+            h.remove() 
+
+        for name in subset:
+            print(i, name)
+            logger.info("Pruning ...")
+            
+            indexed_name = f'{name}_layer_{i}'
+            W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
+            if not args.gradient_inv:
+                # small_value = torch.tensor(1e-8, dtype=gradients[indexed_name].dtype, device=gradients[indexed_name].device)
+                W_metric_grad = torch.abs(subset[name].weight.data)* torch.abs(gradients[indexed_name].to(device=W_metric.device))
+                W_metric = W_metric.to(dtype=torch.float32) + W_metric_grad.to(dtype=torch.float32)  #+ small_value)
+            else:
+                small_value = torch.tensor(1e-8, dtype=gradients[indexed_name].dtype, device=gradients[indexed_name].device)
+                gradient_inv = 1 / (torch.abs(gradients[indexed_name]) + small_value)
+                W_metric = W_metric.to(dtype=torch.float32)  * gradient_inv.to(device=W_metric.device).to(dtype=torch.float32) 
+
+            W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
+            if args.prune_n != 0:
+                # structured n:m sparsity
+                for ii in range(W_metric.shape[1]):
+                    if ii % args.prune_m == 0:
+                        tmp = W_metric[:, ii:(ii+args.prune_m)].float()
+                        W_mask.scatter_(1,ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
+            else:
+                sort_res = torch.sort(W_metric, dim=-1, stable=True)
+
+                if args.use_variant:
+                    # wanda variant 
+                    tmp_metric = torch.cumsum(sort_res[0], dim=1)
+                    sum_before = W_metric.sum(dim=1)
+
+                    alpha = 0.4
+                    alpha_hist = [0., 0.8]
+                    W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                    while (torch.abs(cur_sparsity - args.sparsity_ratio)>0.001) and (alpha_hist[1]-alpha_hist[0]>=0.001):
+                        if cur_sparsity > args.sparsity_ratio:
+                            alpha_new = (alpha + alpha_hist[0]) / 2.0
+                            alpha_hist[1] = alpha
+                        else:
+                            alpha_new = (alpha + alpha_hist[1]) / 2.0
+                            alpha_hist[0] = alpha
+
+                        alpha = alpha_new 
+                        W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                    print(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
+                else:
+                    # unstructured pruning
+                    indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
+                    W_mask.scatter_(1, indices, True)
+
+            subset[name].weight.data[W_mask] = 0
+        
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        inps, outs = outs, inps
+
+    model.config.use_cache = use_cache 
+    torch.cuda.empty_cache()
 
 
 def check_outlier_mean(mask,threshold):
@@ -1859,11 +2195,12 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     cur_sparsity = (W_mask==True).sum() / W_mask.numel()
     return W_mask, cur_sparsity
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl"]
+        "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", "gblm-pruner", "pruner-zero"]
     )
     parser.add_argument(
         "--model", type=str, help="LlaMA model to load"
@@ -1938,6 +2275,13 @@ if __name__ == "__main__":
     parser.add_argument("--Lamda", default=0.08, type=float, help="Lamda")
     parser.add_argument('--Hyper_m', type=float, default=3)
 
+    # For GBLM-Pruner
+    parser.add_argument('--gradient_inv', action='store_true', help='Use inverse of gradient')
+
+    # For Pruner-Zero
+    parser.add_argument("--gradient_path", type=str, default=None, help="Path to save the gradient.")
+    parser.add_argument("--json_tree", type=str, default="./prunellm/prunerzero/best_tree.json", help="Path to load the json tree.")
+    
     args = parser.parse_args()
 
     if args.initial_method != None:
@@ -2108,4 +2452,65 @@ if __name__ == "__main__":
             llama_eval(args, model, testloader, DEV, dataset, logger) 
         
         if args.save_model:    
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "gradient":
+        from eval import llama_eval
+
+        logger.info("Pruning Gradient ...") 
+        tick = time.time()
+        llama_sequential_gradient(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:    
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "gblm-pruner":
+        from prunellm.gblm_pruner import GBLMPrunerGPT
+        from eval import llama_eval
+
+        logger.info("Pruning GBLM-Pruner ...") 
+        tick = time.time()
+        llama_sequential_gblm_pruner(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:    
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "pruner-zero":
+        from prunellm.pruner_zero import PrunerZeroGPT
+        from prunellm.prunerzero.gptree import GPTree
+        from eval import llama_eval
+
+        logger.info("Pruning PrunerZero ...") 
+        tick = time.time()
+        engine = GPTree.load_tree(args.json_tree)
+        llama_sequential_prunerzero(args, model, dataloader, DEV, logger, engine)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:
             model.save_pretrained(args.save_model)

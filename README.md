@@ -2,14 +2,15 @@
 LLM Un-Structured Pruning Methods
 
 Include:
-| Methods   | Quantize | PPL Eval | Task Eval | Save |
-| :-------- | :-------:| :------: | :-------: | :---:|
-| Magnitude | ✅ | ✅ | TODO | TODO 
-| SparseGPT | ✅ | ✅ | TODO | TODO 
-| Wanda     | ✅ | ✅ | TODO | TODO 
-| SparseLLM | ✅ | ✅ | TODO | TODO 
-| DSnoT     | ✅ | ✅ | TODO | TODO 
-| OWL       | TODO | TODO | TODO | TODO 
+| Methods     | Quantize | PPL Eval | Task Eval | Save |
+| :--------   | :-------:| :------: | :-------: | :---:|
+| Magnitude   | ✅ | ✅ | TODO | TODO 
+| SparseGPT   | ✅ | ✅ | TODO | TODO 
+| Wanda       | ✅ | ✅ | TODO | TODO 
+| SparseLLM   | ✅ | ✅ | TODO | TODO 
+| DSnoT       | ✅ | ✅ | TODO | TODO 
+| OWL         | ✅ | ✅ | TODO | TODO 
+| Pruner-Zero | TODO | TODO | TODO | TODO 
 
 
 add `--eval_zero_shot` to evaluate 
@@ -77,7 +78,8 @@ python llama.py \
 --save_model save_models/wanda/ 
 ```
 
-For unstructured 50% sparsity
+For unstructured 50% sparsity \
+add `--use_variant` for wanda variant
 ```
 python llama.py \
 --model /PATH/TO/LLAMA3/ \
@@ -174,7 +176,8 @@ python  llama.py \
 --nsamples 16
 ```
 
-For OWL-Wanda
+For OWL-Wanda \
+add `--use_variant` for wanda variant
 ```
 python  llama.py \
 --model /PATH/TO/LLAMA2/ \
@@ -198,4 +201,77 @@ python  llama.py \
 --Lamda 0.08 \
 --Hyper_m 5 \
 --save_model save_models/OWL/wanda/ 
+```
+
+
+## GBLM-Pruner
+1. Computate of gradient magnitude for calculation of pruning metric
+```
+python gradient_computation.py \
+--nsamples 128 \
+--model /PATH/TO/LLAMA2/ \
+--llama_version 2 \
+--task gradient
+```
+2. For unstructured pruning \
+add `--use_variant` for wanda variant
+```
+python  llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method gblm-pruner \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type unstructured \
+--save_model save_models/gblm_pruner/ \
+--gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
+--nsamples 16
+```
+For structured N:M sparsity, "2:4" or "4:8"
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method gblm-pruner \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
+--save_model save_models/gblm_pruner/ \
+--gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
+--nsamples 16
+```
+
+
+## Pruner-Zero
+
+1. Computate of gradient magnitude for calculation of pruning metric
+```
+python gradient_computation.py 
+--nsamples 128 \
+--model /PATH/TO/LLAMA2/ \
+--llama_version 2 \
+--task gradient
+```
+2. For unstructured pruning \
+add `--use_variant` for wanda variant
+```
+python  llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method pruner-zero \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type unstructured \
+--save_model save_models/pruner_zero/ \
+--gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
+--nsamples 16 
+```
+For structured N:M sparsity, "2:4" or "4:8"
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method pruner-zero \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
+--save_model save_models/pruner_zero/ \
+--gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
+--nsamples 16
 ```
