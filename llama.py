@@ -4,6 +4,8 @@ import torch.nn as nn
 import argparse
 from pathlib import Path
 import numpy as np
+import math
+import transformers
 
 from utils.logutils import create_logger
 from utils.datautils import get_loaders
@@ -753,22 +755,22 @@ def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
             if args.prune_n != 0:
                 if (name.split(".")[0] == args.skip_layer or name.split(".")[1] == args.skip_sub_layer):
                     for ii in range(initial_metric.shape[1]):
-                        if ii % prune_m == 0:
-                            tmp = initial_metric[:, ii : (ii + prune_m)].float()
-                            weight_mask.scatter_(1, ii + torch.topk(tmp, prune_n, dim=1, largest=False)[1], True,)
+                        if ii % args.prune_m == 0:
+                            tmp = initial_metric[:, ii : (ii + args.prune_m)].float()
+                            weight_mask.scatter_(1, ii + torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True,)
                 else:
                     initial_prune_indices = torch.zeros((initial_metric.shape[0], 0), dtype=torch.int64, device=initial_metric.device,)
                     initial_res_indices = torch.zeros((initial_metric.shape[0], 0), dtype=torch.int64, device=initial_metric.device,)
 
                     for ii in range(initial_metric.shape[1]):
-                        if ii % prune_m == 0:
-                            tmp = initial_metric[:, ii : (ii + prune_m)].float()
+                        if ii % args.prune_m == 0:
+                            tmp = initial_metric[:, ii : (ii + args.prune_m)].float()
                             _, tmp_all_indices = torch.sort(tmp, dim=1)
                             tmp_all_indices += ii
-                            res_prune_n = prune_m - prune_n
+                            res_prune_n = args.prune_m - args.prune_n
                             tmp_indices, tmp_res_indices = torch.split(
                                 tmp_all_indices,
-                                split_size_or_sections=[prune_n, res_prune_n],
+                                split_size_or_sections=[args.prune_n, res_prune_n],
                                 dim=1,
                             )
 
@@ -843,12 +845,12 @@ def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
                         )
 
                         recover_block_start_indice = (
-                            regrowing_indice - regrowing_indice % prune_m
+                            regrowing_indice - regrowing_indice % args.prune_m
                         )
 
                         recover_block_indices = (
                             torch.arange(
-                                0, prune_m, device=recover_block_start_indice.device
+                                0, args.prune_m, device=recover_block_start_indice.device
                             ).repeat(recover_block_start_indice.shape[1], 1)
                             + recover_block_start_indice
                         )
@@ -1851,6 +1853,8 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
 def llama_sequential_prunerzero(args, model, dataloader, dev, logger, engine=None):
     logger.info("Starting...")
 
+
+
     # Load gradients
     with open(args.gradient_path, 'rb') as file:
         gradients = torch.load(
@@ -2175,6 +2179,169 @@ def llama_sequential_gblm_pruner(args, model, dataloader, dev, logger):
     torch.cuda.empty_cache()
 
 
+def llama_sequential_flap(args, model, dataloader, dev, logger):
+    logger.info("Starting...")
+
+    use_cache = model.config.use_cache 
+    model.config.use_cache = False 
+    layers = model.model.layers
+
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
+    torch.cuda.empty_cache()
+    
+    outs = torch.zeros_like(inps)
+    attention_mask = cache["attention_mask"]
+    position_ids = cache['position_ids']
+
+    logger.info('Ready.')
+
+    attn_metric_list, mlp_metric_list = [], []
+    attn_baseline_inp_list, mlp_baseline_inp_list = [], []
+    attn_mask, mlp_mask = [], []
+
+    hf_device_map = model.hf_device_map
+    logger.info(hf_device_map)
+
+    for i in range(len(layers)):
+        logger.info(f'================={i}==================')
+        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        layer = layers[i].to(hf_device)
+        inps = inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
+
+        subset = {}
+        subset.update({'self_attn.o_proj': find_layers(layer)['self_attn.o_proj']})
+        subset.update({'mlp.down_proj': find_layers(layer)['mlp.down_proj']})
+
+        wrapped_layers = {}
+        for name in subset:
+                wrapped_layers[name] = FLAPGPT(subset[name], args.metrics)            
+
+        def add_batch(name):
+            def tmp(_, inp, out):
+                wrapped_layers[name].add_batch(inp[0].data, out.data)
+            return tmp
+
+        handles = []
+        for name in wrapped_layers:
+            handles.append(subset[name].register_forward_hook(add_batch(name)))
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        for h in handles:
+            h.remove()
+
+        for name in subset:
+            if name == 'self_attn.o_proj':
+                W_metric = metrics[args.metrics](wrapped_layers, subset, name) ** 2
+                if args.structure == "UL-UM":
+                    W_metric = W_metric.reshape(-1, 128).sum(dim=1)
+                    thresh = torch.sort(W_metric.cuda())[0][int(args.pruning_ratio*layer.self_attn.num_heads)].cpu()
+                    W_mask = (W_metric>=thresh)
+                    attn_mask.append(W_mask)
+                elif args.structure == "UL-MM":
+                    W_metric = W_metric.reshape(-1, 128).sum(dim=1)
+                    thresh = torch.sort(W_metric.cuda())[0][args.remove_heads // len(layers)].cpu()
+                    W_mask = (W_metric>=thresh)
+                    attn_mask.append(W_mask)
+                else:
+                    attn_metric_list.append(W_metric.cpu())
+                attn_baseline_inp_list.append(wrapped_layers[name].baseline_inp.type(torch.half))
+            else:
+                W_metric = metrics[args.metrics](wrapped_layers, subset, name)
+                if args.structure == "UL-UM":
+                    thresh = torch.sort(W_metric.cuda())[0][int(W_metric.numel()*args.pruning_ratio)].cpu()
+                    W_mask = (W_metric>=thresh)
+                    mlp_mask.append(W_mask)
+                elif args.structure == "UL-MM":
+                    thresh = torch.sort(W_metric.cuda())[0][cal_remove_neuron(args, model)].cpu()
+                    W_mask = (W_metric>=thresh)
+                    mlp_mask.append(W_mask)
+                else:
+                    mlp_metric_list.append(W_metric.cpu())
+                mlp_baseline_inp_list.append(wrapped_layers[name].baseline_inp.type(torch.half))
+            wrapped_layers[name].free()
+
+        inps, outs = outs, inps # Use the original output as input to the next layer
+        torch.cuda.empty_cache()
+    
+    standarlization = lambda x: (x - torch.mean(x, axis=1, keepdim=True)) / torch.std(x, axis=1, keepdim=True)
+
+    if args.structure in ["AL-MM", "AL-AM"]:
+        attn_metric = torch.stack(attn_metric_list)
+        attn_metric = standarlization(attn_metric)
+        attn_metric = attn_metric.reshape(len(layers), -1, 128).mean(dim=2)
+        
+        mlp_metric = torch.stack(mlp_metric_list)
+        mlp_metric = standarlization(mlp_metric)
+        
+        if args.structure == "AL-MM":
+            sorted_attn = torch.sort(attn_metric.view(-1), descending=True)[0]
+            attn_thres = sorted_attn[-int(args.remove_heads)]
+            attn_mask = (attn_metric > attn_thres)  # 1 means retain
+            
+            sorted_mlp = torch.sort(mlp_metric.view(-1), descending=True)[0]
+            mlp_thres = sorted_mlp[-cal_remove_neuron(args, model)]
+            mlp_mask = (mlp_metric > mlp_thres)
+        else:
+            prune_metric = torch.cat([attn_metric.view(-1), mlp_metric.view(-1)])
+            sorted_prune, indices = torch.sort(prune_metric, descending=True)
+            compression_weight = torch.ones_like(indices)
+            compression_weight[indices < attn_metric.numel()] = 512.0 / 3
+            threshold = sorted_prune[torch.argmin(torch.abs(torch.cumsum(compression_weight, 0) - torch.sum(compression_weight)*(1 - args.pruning_ratio)))]
+            attn_mask = (attn_metric > threshold)
+            mlp_mask = (mlp_metric > threshold)
+    else:
+        attn_mask = torch.stack(attn_mask) 
+        mlp_mask = torch.stack(mlp_mask)
+    
+    for idx in range(len(layers)):
+        if f"model.layers.{i}" in getattr(model, 'hf_device_map', {}): 
+            compress(model.model.layers[idx], attn_mask[idx], None, attn_baseline_inp_list[idx], None, model.hf_device_map[f"model.layers.{idx}"], unstr=args.unstr)
+        else:
+            compress(model.model.layers[idx], attn_mask[idx], None, attn_baseline_inp_list[idx], None, DEV, unstr=args.unstr)
+                
+        if f"model.layers.{i}" in getattr(model, 'hf_device_map', {}): 
+            compress(model.model.layers[idx], None, mlp_mask[idx], None, mlp_baseline_inp_list[idx], model.hf_device_map[f"model.layers.{idx}"], unstr=args.unstr)
+        else:
+            compress(model.model.layers[idx], None, mlp_mask[idx], None, mlp_baseline_inp_list[idx], DEV, unstr=args.unstr)
+                
+    model.config.use_cache = use_cache 
+    torch.cuda.empty_cache()
+
+
 def check_outlier_mean(mask,threshold):
     W = mask
     count = 0 
@@ -2200,7 +2367,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", "gblm-pruner", "pruner-zero"]
+        "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", "gblm-pruner", "pruner-zero", "flap"]
     )
     parser.add_argument(
         "--model", type=str, help="LlaMA model to load"
@@ -2281,6 +2448,14 @@ if __name__ == "__main__":
     # For Pruner-Zero
     parser.add_argument("--gradient_path", type=str, default=None, help="Path to save the gradient.")
     parser.add_argument("--json_tree", type=str, default="./prunellm/prunerzero/best_tree.json", help="Path to load the json tree.")
+
+    # For FLAP
+    parser.add_argument('--pruning_ratio', type=float, default=0, help='Pruning ratio.')
+    parser.add_argument('--remove_heads', type=int, default=8, help='Remove num_heads')
+    parser.add_argument("--metrics", type=str, default="WIFV", choices=["IFV", "WIFV", "WIFN", 'N/A'])
+    parser.add_argument("--structure", type=str, default="AL-AM", choices=["UL-UM", "UL-MM", "AL-MM", "AL-AM", 'N/A'])
+    parser.add_argument('--unstr', action="store_true")
+
     
     args = parser.parse_args()
 
@@ -2298,7 +2473,7 @@ if __name__ == "__main__":
     torch.random.manual_seed(args.seed)
 
     args.prune_n, args.prune_m = 0, 0
-    if args.sparsity_type != "unstructured":
+    if args.sparsity_type != "unstructured" and args.sparsity_ratio != 0:
         assert args.sparsity_ratio == 0.5, "sparsity ratio must be 0.5 for structured N:M sparsity"
         args.prune_n, args.prune_m = map(int, args.sparsity_type.split(":"))
         args.save_model = f"{args.save_model}/{args.prune_n}_{args.prune_m}"
@@ -2513,4 +2688,24 @@ if __name__ == "__main__":
             llama_eval(args, model, testloader, DEV, dataset, logger) 
         
         if args.save_model:
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "flap":
+        from prunellm.flap import FLAPGPT, cal_remove_neuron, compress, metrics
+        from eval import llama_eval
+
+        logger.info("Pruning Flap ...") 
+        tick = time.time()
+        llama_sequential_flap(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:    
             model.save_pretrained(args.save_model)

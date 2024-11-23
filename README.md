@@ -10,7 +10,9 @@ Include:
 | SparseLLM   | ✅ | ✅ | TODO | TODO 
 | DSnoT       | ✅ | ✅ | TODO | TODO 
 | OWL         | ✅ | ✅ | TODO | TODO 
-| Pruner-Zero | TODO | TODO | TODO | TODO 
+| Pruner-Zero | ✅ | ✅ | TODO | TODO 
+| FLAP        | ✅ | ✅ | TODO | TODO 
+
 
 
 add `--eval_zero_shot` to evaluate 
@@ -275,3 +277,16 @@ python llama.py \
 --gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
 --nsamples 16
 ```
+
+
+## FLAP
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method flap \
+--dataset c4 \
+--pruning_ratio 0.2 \
+--remove_heads -1 \
+--metrics WIFV \
+--structure AL-AM \
+--nsamples 1024 \
+--save_model save_models/flap/ \

@@ -108,6 +108,34 @@ def llama_eval(args, model, testenc, dev,  dataset: str, logger):
     model.config.use_cache = use_cache
 
 
+def llama_eval_ppl(args, model, testenc, dev, logger):
+    logger.info("Evaluating ...")
+
+    testenc = testenc.input_ids
+    nsamples = testenc.numel() // model.seqlen
+    hf_device_map = model.hf_device_map
+    logger.info(hf_device_map)
+    hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+
+    testenc = testenc.to(hf_device)
+    nlls = []
+    for i in range(nsamples):
+        inputs = testenc[:, (i * model.seqlen):((i+1) * model.seqlen)].to(hf_device)
+        inputs = inputs.reshape(j-i, model.seqlen)
+
+        lm_logits = model(inputs).logits
+
+        shift_logits = lm_logits[:, :-1, :].contiguous()
+        shift_labels = inputs[:, 1:]
+        loss_fct = nn.CrossEntropyLoss()
+        loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+        )
+        neg_log_likelihood = loss.float() * model.seqlen
+        nlls.append(neg_log_likelihood)
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+    logger.info(f"Perplexity: {ppl.item():3f}")
+
 def eval_zero_shot(model_name, model, logger, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
         num_fewshot=0,  add_special_tokens=False): 
     import lm_eval
