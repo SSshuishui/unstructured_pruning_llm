@@ -10,8 +10,12 @@ Include:
 | SparseLLM   | ✅ | ✅ | TODO | TODO 
 | DSnoT       | ✅ | ✅ | TODO | TODO 
 | OWL         | ✅ | ✅ | TODO | TODO 
+| GBLM-Pruner | ✅ | ✅ | TODO | TODO 
 | Pruner-Zero | ✅ | ✅ | TODO | TODO 
 | FLAP        | ✅ | ✅ | TODO | TODO 
+| admm        | TODO | TODO | TODO | TODO 
+| RIA         | TODO | TODO | TODO | TODO 
+| rethinking llm prune | TODO | TODO | TODO | TODO 
 
 
 
@@ -284,9 +288,54 @@ python llama.py \
 --model /PATH/TO/LLAMA2/ \
 --prune_method flap \
 --dataset c4 \
---pruning_ratio 0.2 \
+--sparsity_ratio 0.2 \
 --remove_heads -1 \
 --metrics WIFV \
 --structure AL-AM \
 --nsamples 1024 \
 --save_model save_models/flap/ \
+
+
+
+## Admm
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method admm \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--save_model save_models/admm/ 
+
+
+For structured N:M sparsity, "2:4" or "4:8"
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method admm \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
+--save_model save_models/admm/ \
+```
+
+
+## RIA (Relative Importance and Activations)
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method RIA \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--save_model save_models/RIA/ \
+
+
+For structured N:M sparsity, "2:4" or "4:8"
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method RIA \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
+--save_model save_models/RIA/ \
+```
