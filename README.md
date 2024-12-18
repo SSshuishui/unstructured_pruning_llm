@@ -2,20 +2,21 @@
 LLM Un-Structured Pruning Methods
 
 Include:
-| Methods     | Quantize | PPL Eval | Task Eval | Save |
-| :--------   | :-------:| :------: | :-------: | :---:|
-| Magnitude   | ✅ | ✅ | TODO | TODO 
-| SparseGPT   | ✅ | ✅ | TODO | TODO 
-| Wanda       | ✅ | ✅ | TODO | TODO 
-| SparseLLM   | ✅ | ✅ | TODO | TODO 
-| DSnoT       | ✅ | ✅ | TODO | TODO 
-| OWL         | ✅ | ✅ | TODO | TODO 
-| GBLM-Pruner | ✅ | ✅ | TODO | TODO 
-| Pruner-Zero | ✅ | ✅ | TODO | TODO 
-| FLAP        | ✅ | ✅ | TODO | TODO 
-| admm        | TODO | TODO | TODO | TODO 
-| RIA         | TODO | TODO | TODO | TODO 
-| rethinking llm prune | TODO | TODO | TODO | TODO 
+| Methods      | Quantize | PPL Eval | Task Eval | Save |
+| :--------    | :-------:| :------: | :-------: | :---:|
+| Magnitude    | yes | yes | TODO | TODO 
+| [SparseGPT](https://arxiv.org/pdf/2301.00774)    | yes | yes | TODO | TODO 
+| [Wanda](https://arxiv.org/pdf/2306.11695)        | yes | yes | TODO | TODO 
+| [SparseLLM](https://arxiv.org/pdf/2402.17946)    | yes | yes | TODO | TODO 
+| [DSnoT](https://arxiv.org/pdf/2310.08915)        | yes | yes | TODO | TODO 
+| [OWL](https://arxiv.org/pdf/2310.05175)          | yes | yes | TODO | TODO 
+| [GBLM-Pruner](https://arxiv.org/pdf/2311.04902)  | yes | yes | TODO | TODO 
+| [Pruner-Zero](https://arxiv.org/pdf/2406.02924v1)| yes | yes | TODO | TODO 
+| [FLAP](https://arxiv.org/pdf/2312.11983)         | yes | yes | TODO | TODO 
+| [admm](https://arxiv.org/pdf/2401.02938)         | yes | yes | TODO | TODO 
+| [RIA](https://openreview.net/forum?id=Tr0lPx9woF)| yes | yes | TODO | TODO 
+| [AlphaPruninig](https://arxiv.org/pdf/2410.10912)| yes | yes | TODO | TODO 
+| [ALPS](https://arxiv.org/pdf/2406.07831)         | yes | yes | TODO | TODO 
 
 
 
@@ -338,4 +339,62 @@ python llama.py \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
 --save_model save_models/RIA/ \
+```
+
+## AlphaPruning
+### magnitude based
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method alphapruning \
+--initial_method magnitude \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--ww_metric alpha_peak \
+--epsilon 0.3 \
+--save_model save_models/alphapruning/
+
+### wanda based
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method alphapruning \
+--initial_method wanda \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--ww_metric alpha_peak \
+--epsilon 0.3 \
+--save_model save_models/alphapruning/
+
+### sparsegpt based
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method alphapruning \
+--initial_method sparsegpt \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--ww_metric alpha_peak \
+--epsilon 0.3 \
+--save_model save_models/alphapruning/
+
+
+## ALPS
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method ALPS \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--save_model save_models/ALPS/
+
+For structured N:M sparsity, "2:4" or "4:8"
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method ALPS \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
+--save_model save_models/ALPS/ \
 ```

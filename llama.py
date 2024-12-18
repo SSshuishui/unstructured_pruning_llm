@@ -25,13 +25,17 @@ def get_llama(model):
     return model
 
 
-def llama_sequential_magnitude(args, model, dataloader, dev, logger):
+def llama_sequential_magnitude(args, model, dataloader, dev, logger, ratios=None):
     logger.info("Starting...")
 
     layers = model.model.layers 
 
     hf_device_map = model.hf_device_map
 
+    if ratios is None:
+        ratios = [args.sparsity_ratio for i in range(len(layers))]
+
+    k = 0
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
         hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
@@ -48,7 +52,7 @@ def llama_sequential_magnitude(args, model, dataloader, dev, logger):
                         tmp = W_metric[:,ii:(ii+args.prune_m)].float()
                         W_mask.scatter_(1,ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
             else:
-                thresh = torch.sort(W_metric.flatten().cuda())[0][int(W.numel()*args.sparsity_ratio)].cpu()
+                thresh = torch.sort(W_metric.flatten().cuda())[0][int(W.numel()*ratios[k])].cpu()
                 W_mask = (W_metric<=thresh)
 
             W[W_mask] = 0
@@ -57,7 +61,7 @@ def llama_sequential_magnitude(args, model, dataloader, dev, logger):
 
 
 @torch.no_grad()
-def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
+def llama_sequential_sparsegpt(args, model, dataloader, dev, logger, ratios=None):
     logger.info("Starting...")
 
     use_cache = model.config.use_cache
@@ -108,7 +112,11 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
     hf_device_map = model.hf_device_map
     logger.info(hf_device_map)
 
+    if ratios is None:
+        ratios = [args.sparsity_ratio for i in range(len(layers))]
+
     quantizers = {}
+    k=0
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
         hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
@@ -162,12 +170,13 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
                 print(i, name)
                 logger.info("Pruning ...")
                 gpts[name].fasterprune(
-                    args.sparsity_ratio,
+                    ratios[k],
                     prunen=args.prune_n,
                     prunem=args.prune_m,
                     percdamp=args.percdamp
                 )
                 gpts[name].free()
+                k += 1
 
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
@@ -183,7 +192,7 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger):
     torch.cuda.empty_cache()
 
 
-def llama_sequential_wanda(args, model, dataloader, dev, logger):
+def llama_sequential_wanda(args, model, dataloader, dev, logger, ratios=None):
     logger.info("Starting...")
 
     use_cache = model.config.use_cache 
@@ -233,6 +242,10 @@ def llama_sequential_wanda(args, model, dataloader, dev, logger):
 
     hf_device_map = model.hf_device_map
     logger.info(hf_device_map)
+
+    if ratios is None:
+        ratios = [args.sparsity_ratio for i in range(len(layers))]
+    k=0
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
@@ -296,7 +309,8 @@ def llama_sequential_wanda(args, model, dataloader, dev, logger):
                     logger.info(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
                 else:
                     # unstructured pruning
-                    indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
+                    indices = sort_res[1][:,:int(W_metric.shape[1]*ratios[k])]
+                    k += 1
                     W_mask.scatter_(1, indices, True)
 
             subset[name].weight.data[W_mask] = 0  ## set weights to zero 
@@ -2717,6 +2731,113 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
     torch.cuda.empty_cache()
 
 
+def llama_sequential_ALPS(args, model, dataloader, dev, logger):
+    logger.info("Starting...")
+
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    layers = model.model.layers
+
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
+    torch.cuda.empty_cache()
+
+    outs = torch.zeros_like(inps)
+    attention_mask = cache['attention_mask']
+    position_ids = cache['position_ids']
+
+    logger.info("Ready.")
+
+    hf_device_map = model.hf_device_map
+    logger.info(hf_device_map)
+
+    for i in range(len(layers)):
+        logger.info(f'================={i}==================')
+        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        layer = layers[i].to(hf_device)
+        inps = inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
+
+        full = find_layers(layer)
+        
+        sequential = [list(full.keys())]
+
+        for names in sequential:
+            subset = {n: full[n] for n in names}
+
+            gpts = {}
+            for name in subset:
+                gpts[name] = ALPSGPT(subset[name], nsamples=args.nsamples, seqlen=model.seqlen)
+
+            def add_batch(name):
+                def tmp(_, inp, out):
+                    gpts[name].add_batch(inp[0].data, out.data)
+                return tmp
+
+            handles = []
+            for name in subset:
+                handles.append(subset[name].register_forward_hook(add_batch(name)))
+            for j in range(args.nsamples):
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            for h in handles:
+                h.remove()
+
+            for name in subset:
+                print(i, name)
+                logger.info("Pruning ...")
+                gpts[name].ALPS_admm(
+                    args.sparsity_ratio,
+                    prunen=args.prune_n,
+                    prunem=args.prune_m,
+                    rho=args.rho
+                )
+                gpts[name].free()
+
+        for j in range(args.nsamples):
+            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+
+        layers[i] = layer.cpu()
+        del layer
+        del gpts
+        torch.cuda.empty_cache()
+
+        inps, outs = outs, inps
+
+    model.config.use_cache = use_cache
+
+
+
 def check_outlier_mean(mask,threshold):
     W = mask
     count = 0 
@@ -2729,6 +2850,7 @@ def check_outlier_mean(mask,threshold):
     
     return outlier_ratio
 
+
 def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     thres_cumsum = sum_before * alpha 
     sort_mask = tmp_metric <= thres_cumsum.reshape((-1,1))
@@ -2736,6 +2858,44 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     W_mask = (W_metric <= thres)
     cur_sparsity = (W_mask==True).sum() / W_mask.numel()
     return W_mask, cur_sparsity
+
+
+def ww_sparsity(args, model, device=torch.device("cuda:0"), s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0):
+    if "opt" in args.model:
+        blocks = model.model.decoder.layers    
+    else:
+        blocks = model.model.layers
+    
+    layers = [find_layers(blocks)]
+    prunables = []
+    for layer in layers:
+        for name in layer:
+            prunables.append(layer[name].weight.numel())
+
+    layer_num_in_block = int(len(prunables) / len(blocks))
+
+    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
+    
+    if args.mapping_type == 'block_wise':
+        block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) for i in range(0, len(metrics), layer_num_in_block)]
+        metrics = [i for i in block_metrics for j in range(layer_num_in_block)]
+    
+    # print("metric values:", metrics)
+            
+    scores = torch.tensor(metrics)
+    prunables = torch.tensor(prunables)
+
+    # linear mapping
+    max = torch.max(scores)
+    min = torch.min(scores)
+    
+    layerwise_pruning_ratios = (((scores - min) / (max - min)) * (s2 - s1) + s1)
+    scaler = torch.sum(prunables) * args.sparsity_ratio / (torch.sum(prunables * layerwise_pruning_ratios))  
+    layerwise_pruning_ratios = layerwise_pruning_ratios * scaler
+    layerwise_pruning_ratios = layerwise_pruning_ratios.cpu().numpy().tolist()
+    
+    print(layerwise_pruning_ratios)
+    return layerwise_pruning_ratios
 
 
 def check_sparsity(args, model):
@@ -2763,11 +2923,13 @@ def check_sparsity(args, model):
     model.config.use_cache = use_cache 
     return float(count)/total_params 
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", "gblm-pruner", "pruner-zero", "flap", "admm", "RIA"]
+        "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", 
+        "gblm-pruner", "pruner-zero", "flap", "admm", "RIA", "alphapruning", "ALPS"]
     )
     parser.add_argument(
         "--model", type=str, help="LlaMA model to load"
@@ -2818,7 +2980,7 @@ if __name__ == "__main__":
         "--save_model", type=str, default="", help="Path to saved model."
     )
     parser.add_argument(
-        "--true-sequential", action="store_true", help="Whether to run in true sequential model.",
+        "--true_sequential", action="store_true", help="Whether to run in true sequential model.",
     )
     parser.add_argument(
         '--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix"
@@ -2864,6 +3026,15 @@ if __name__ == "__main__":
     parser.add_argument("--importance_score", type=str, default="sum", help="assign importance score for columns")
     parser.add_argument("--per_outneuron", action="store_true", help="pruning per outneuron. Wanda's tactic.")
 
+    # For AlphaPruning
+    parser.add_argument("--ww_metric", default="alpha_peak", type=str, help="the WW-based metric to ues.")
+    parser.add_argument("--ww_metric_cache", default="./cache/")
+    parser.add_argument("--epsilon", default=0.3, type=float, help="for pruning ratio allocation.")
+    parser.add_argument("--mapping_type", default="block_wise", type=str, help="mapping type for pruning ratios allocation.")
+    
+    # For ALPS
+    parser.add_argument('--rho', type=float, default=300.0, help='initial rho')
+    
 
     args = parser.parse_args()
 
@@ -2886,7 +3057,10 @@ if __name__ == "__main__":
         args.prune_n, args.prune_m = map(int, args.sparsity_type.split(":"))
         args.save_model = f"{args.save_model}/{args.prune_n}_{args.prune_m}"
     else:
-        args.save_model = f"{args.save_model}/{args.sparsity_type}"
+        if args.initial_method != None:
+            args.save_model = f"{args.save_model}/{args.initial_method}/{args.sparsity_type}"
+        else:
+            args.save_model = f"{args.save_model}/{args.sparsity_type}"
 
 
     logger.info(f"loading llm model: {args.model}")
@@ -2925,10 +3099,6 @@ if __name__ == "__main__":
         logger.info("Pruning SparseGPT...") 
         tick = time.time()
         llama_sequential_sparsegpt(args, model, dataloader, DEV, logger)
-        for n, p in model.named_parameters():
-            print(n, torch.mean((p == 0).float()))
-            if 'down_proj' in n:
-                break
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
@@ -3180,6 +3350,73 @@ if __name__ == "__main__":
         llama_sequential_RIA(args, model, dataloader, DEV, logger)
         logger.info(f"Total time: {time.time() - tick}")
         
+        logger.info("Check sparisity ratio ...")
+        sparsity_ratio = check_sparsity(args, model)
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:    
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "alphapruning":
+        from prunellm.esd_utils import get_esd_metrics
+        from eval import llama_eval
+
+        logger.info("Pruning AlphaPruning ...") 
+        tick = time.time()
+
+        if args.ww_metric_cache:
+            args.ww_metric_cache = f"{args.ww_metric_cache}/{args.model.split('/')[-1]}"
+            Path(args.ww_metric_cache).mkdir(parents=True, exist_ok=True)
+            print("cache path: ", args.ww_metric_cache)
+        # metric_values = get_esd_metrics(args, model, args.ww_metric)
+        # np.save(f"{args.ww_metric_cache}/{args.ww_metric}.npy", metric_values)
+
+        s1 = 1.0 - args.epsilon
+        s2 = 1.0 + args.epsilon
+        ratios = ww_sparsity(args, model, DEV, s1, s2)
+
+        if args.initial_method == "wanda":
+            from prunellm.wanda import WandaGPT
+            llama_sequential_wanda(args, model, dataloader, DEV, logger, ratios=ratios)
+        elif args.initial_method == "sparsegpt":
+            from prunellm.sparsegpt import SparseGPT
+            from prunellm.quant import Quantizer
+            llama_sequential_sparsegpt(args, model, dataloader, DEV, logger, ratios=ratios)
+        elif args.initial_method == "magnitude":
+            llama_sequential_magnitude(args, model, dataloader, DEV, logger, ratios=ratios)
+
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("Check sparisity ratio ...")
+        sparsity_ratio = check_sparsity(args, model)
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:    
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "ALPS":
+        from prunellm.ALPS import ALPSGPT
+        from eval import llama_eval
+
+        logger.info("Pruning ALPS ...") 
+        tick = time.time()
+        llama_sequential_ALPS(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
         logger.info("Check sparisity ratio ...")
         sparsity_ratio = check_sparsity(args, model)
 
