@@ -1661,6 +1661,7 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
     model.config.use_cache = use_cache
     torch.cuda.empty_cache()
 
+
 def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
     logger.info("Starting...")
 
@@ -2837,6 +2838,217 @@ def llama_sequential_ALPS(args, model, dataloader, dev, logger):
     model.config.use_cache = use_cache
 
 
+def llama_sequential_min_recon_error(args, model, dataloader, dev, logger):
+    logger.info("Starting...")
+
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    layers = model.model.layers
+
+    prune_nsamples = args.nsamples
+
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = torch.float32
+    inps = torch.zeros(
+        (prune_nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+        
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
+    torch.cuda.empty_cache()
+
+    outs = torch.zeros_like(inps)
+    attention_mask = cache['attention_mask']
+    position_ids = cache['position_ids']
+
+    logger.info("Ready.")
+
+    dense_inps = inps.clone()
+    dense_outs = torch.zeros_like(inps)
+
+    if args.initial_method == 'magnitude':
+        from prunellm.min_recon_error.prune_fn import prune_magnitude
+        prune_fn = prune_magnitude
+    elif args.initial_method == 'wanda':
+        from prunellm.min_recon_error.prune_fn import prune_wanda
+        prune_fn = prune_wanda
+    elif args.initial_method == 'sparsegpt':
+        from prunellm.min_recon_error.prune_fn import prune_sparsegpt
+        prune_fn = prune_sparsegpt
+    
+    dense_layers = []
+
+    if args.use_cr:
+        update_round = len(layers) + 1
+        update_start = -1
+    else:
+        update_round = 1
+        update_start = 0
+
+    hf_device_map = model.hf_device_map
+    logger.info(hf_device_map)
+
+    for i in range(update_start, update_start + update_round):
+        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        layer = layers[i].to(hf_device)
+        inps = inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
+
+
+        if args.use_cr:
+            if i == -1:
+                logger.info(f'pruning layer {i + 1}')
+            elif i == (len(layers) - 1):
+                logger.info(f'pruning layer {len(layers) - 1}')
+            else:
+                logger.info(f'pruning layer {i} & {i+1}')
+        else:
+            logger.info(f'pruning layer {i}')
+
+        if args.use_cr:
+            # For CR, save the current dense layer
+            start_idx = max(0, i)
+            end_idx = min(i + 1, len(layers) - 1)
+            layer = layers[start_idx:end_idx + 1]
+            if not (i ==  (len(layers) - 1)):
+                dense_layer = type(layer[-1])(model.config).to(torch.float16).eval()
+                dense_layer.load_state_dict(layer[-1].state_dict())
+                dense_layers.append(dense_layer)
+                dense_layer = dense_layer.float()
+        else:
+            layer = layers[i:i+1]
+        layer = layer.float()
+
+        subset = find_layers(layer)
+        
+        wrapped_layers = {}
+
+        for name in subset:
+            subset[name].prune_rate = 0
+            if args.initial_method == 'magnitude':
+                wrapped_layers[name] = None
+            if args.initial_method == 'wanda':
+                from prunellm.min_recon_error.wanda import WandaGPT
+                wrapped_layers[name] = WandaGPT(subset[name], hf_device)
+            elif args.initial_method == 'sparsegpt':
+                from prunellm.min_recon_error.sparsegpt import SparseGPT
+                wrapped_layers[name] = SparseGPT(subset[name], hf_device)
+        
+
+        def add_batch(name):
+            def tmp(_, inp, out):
+                wrapped_layers[name].add_batch(inp[0].data, out.data)
+            return tmp
+        layer = layer.to(hf_device)
+        handles = []
+
+        if args.initial_method in ['wanda', 'sparsegpt']:
+            for name in wrapped_layers:
+                handles.append(subset[name].register_forward_hook(add_batch(name)))
+        with torch.no_grad():
+            for j in range(prune_nsamples):
+                outs[j] = obtain_output(layer, inps[j].unsqueeze(0).cuda(), attention_mask=attention_mask, position_ids=position_ids).to('cpu')
+        for h in handles:
+            h.remove()
+
+        # obtain outputs for x_dense
+        if args.use_cr:
+            with torch.no_grad():
+                for j in range(start_idx, end_idx + 1):
+                    dense_layers[j] = dense_layers[j].to(hf_device)
+                for j in range(0, prune_nsamples, args.infer_batch_size):
+                    dense_outs[j:j+args.infer_batch_size] = obtain_output(dense_layers[start_idx:end_idx + 1], dense_inps[j:j+args.infer_batch_size].to(hf_device), attention_mask=attention_mask, position_ids=position_ids).to('cpu')
+                for j in range(start_idx, end_idx + 1):
+                    dense_layers[j] = dense_layers[j].to('cpu')
+        else:
+            with torch.no_grad():
+                for j in range(prune_nsamples):
+                    dense_outs[j] = layer[0](dense_inps[j].unsqueeze(0).cuda(), attention_mask=attention_mask, position_ids=position_ids)[0].to('cpu')
+        
+
+
+        for name in subset:
+            print(i, name)
+            subset[name].mask = nn.Parameter(torch.zeros(subset[name].weight.shape, device=hf_device))
+            prune_fn(subset[name], wrapped_layers[name], args.sparsity_ratio, args.prune_n, args.prune_m)
+            subset[name].prune_rate = args.sparsity_ratio
+
+        # perform reconstruction
+        if args.use_gp:
+            train(layer, inps, dense_outs, dataloader, args, hf_device, attention_mask=attention_mask, position_ids=position_ids)
+        else:
+            train(layer, inps, outs, dataloader, args, hf_device, attention_mask=attention_mask, position_ids=position_ids)
+        
+        # calculate recon error
+        if not args.use_cr:
+            recon_error = val(layer, inps, dense_outs, args, hf_device, attention_mask, position_ids)
+            logger.info(f"recon error {recon_error}")
+
+        with torch.no_grad():
+            for name in subset:
+                mask_copy1 = subset[name].mask.clone()
+                subset[name].weight.data = mask_copy1 * subset[name].weight.data
+                subset[name].prune_rate = 0
+
+        torch.cuda.empty_cache()
+
+        # calculate outputs for x_sparse after pruning
+        with torch.no_grad():
+            with torch.amp.autocast("cuda"):
+                for j in range(0, prune_nsamples, args.infer_batch_size):
+                    outs[j:j+args.infer_batch_size] = layer[0](inps[j:j+args.infer_batch_size].to(hf_device), attention_mask=attention_mask, position_ids=position_ids, device=hf_device)[0].to("cpu")
+
+        if args.use_cr:
+            if i < 0:
+                dense_outs = dense_inps.clone()
+                outs = inps.clone()
+            else:
+                with torch.no_grad():
+                    with torch.amp.autocast("cuda"):
+                        dense_layers[i] = dense_layers[i].to(hf_device)
+                        for j in range(0, prune_nsamples, args.infer_batch_size):
+                            dense_outs[j:j+args.infer_batch_size] = obtain_output(dense_layers[i:i+1], dense_inps[j:j+args.infer_batch_size].to(hf_device), attention_mask=attention_mask, position_ids=position_ids).to('cpu')
+                        dense_layers[i] = dense_layers[i].to('cpu')
+
+                recon_error = val(layer[0:1], inps, dense_outs, args, hf_device, attention_mask, position_ids)
+
+                dense_layers[i] = None
+        
+                logger.info(f"recon error {recon_error}")
+                    
+        inps, outs = outs, inps
+        dense_inps, dense_outs = dense_outs, dense_inps
+        layer = layer.to('cpu')
+        torch.cuda.empty_cache()
+
+    model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
+    
 
 def check_outlier_mean(mask,threshold):
     W = mask
@@ -2929,7 +3141,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", 
-        "gblm-pruner", "pruner-zero", "flap", "admm", "RIA", "alphapruning", "ALPS"]
+        "gblm-pruner", "pruner-zero", "flap", "admm", "RIA", "alphapruning", "ALPS", "min_recon_error"]
     )
     parser.add_argument(
         "--model", type=str, help="LlaMA model to load"
@@ -3035,6 +3247,22 @@ if __name__ == "__main__":
     # For ALPS
     parser.add_argument('--rho', type=float, default=300.0, help='initial rho')
     
+    # For Minimize reconstruction Error
+    parser.add_argument('--learning_rate', type=float, default=0.0002, help='Learning rate for training.')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay for optimizer.')
+    parser.add_argument('--adam_beta1', type=float, default=0.9, help='Beta1 for Adam optimizer.')
+    parser.add_argument('--adam_beta2', type=float, default=0.95, help='Beta2 for Adam optimizer.')
+    parser.add_argument('--adam_eps', type=float, default=1e-8, help='Epsilon for Adam optimizer.')
+    parser.add_argument('--max_grad_norm', type=float, default=1000.0, help='Max gradient norm for clipping.')
+    parser.add_argument('--warmup_steps', type=int, default=0, help='Number of warmup steps for learning rate scheduler.')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training.')
+    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs for training.')
+    parser.add_argument('--lr_scheduler', type=str, default='linear', help='Learning rate scheduler type.')
+    parser.add_argument('--accumulation_steps', type=int, default=1, help='Number of gradient accumulation steps.')
+    parser.add_argument('--infer_batch_size', type=int, default=1, help='Number of gradient accumulation steps.')
+    parser.add_argument('--use_gp', action='store_true', help='Whether to use GP.')
+    parser.add_argument('--use_cr', action='store_true', help='Whether to use CR.')
+
 
     args = parser.parse_args()
 
@@ -3415,6 +3643,30 @@ if __name__ == "__main__":
         logger.info("Pruning ALPS ...") 
         tick = time.time()
         llama_sequential_ALPS(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("Check sparisity ratio ...")
+        sparsity_ratio = check_sparsity(args, model)
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:    
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "min_recon_error":
+        from prunellm.min_recon_error.prune_fn import obtain_output, find_layers
+        from prunellm.min_recon_error.finetune import train, val
+        from eval import llama_eval
+
+        logger.info("Pruning Minimize Reconstruction Error ...")
+        tick = time.time()
+        llama_sequential_min_recon_error(args, model, dataloader, DEV, logger)
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
