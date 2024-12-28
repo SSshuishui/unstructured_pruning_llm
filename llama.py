@@ -12,17 +12,27 @@ from utils.datautils import get_loaders
 from utils.modelutils import *
 
 
-def get_llama(model):    
+def get_llama(args, model):    
     import torch
     def skip(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    from transformers import LlamaForCausalLM
-    model = LlamaForCausalLM.from_pretrained(model, device_map='auto', torch_dtype='auto')
-    model.seqlen = 2048
-    return model
+    if args.prune_method in ["EBFT", "min_recon_error"]:
+        from prunellm.EBFT.modeling_llama import LlamaForCausalLM
+        model = LlamaForCausalLM.from_pretrained(
+            model, 
+            torch_dtype=torch.float32, 
+            device_map='auto',
+        )
+        model.seqlen = model.config.max_position_embeddings 
+        return model
+    else:
+        from transformers import LlamaForCausalLM
+        model = LlamaForCausalLM.from_pretrained(model, device_map='auto', torch_dtype='auto')
+        model.seqlen = 2048
+        return model
 
 
 def llama_sequential_magnitude(args, model, dataloader, dev, logger, ratios=None):
@@ -2918,8 +2928,7 @@ def llama_sequential_min_recon_error(args, model, dataloader, dev, logger):
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
-
-
+        
         if args.use_cr:
             if i == -1:
                 logger.info(f'pruning layer {i + 1}')
@@ -2958,8 +2967,7 @@ def llama_sequential_min_recon_error(args, model, dataloader, dev, logger):
             elif args.initial_method == 'sparsegpt':
                 from prunellm.min_recon_error.sparsegpt import SparseGPT
                 wrapped_layers[name] = SparseGPT(subset[name], hf_device)
-        
-
+                
         def add_batch(name):
             def tmp(_, inp, out):
                 wrapped_layers[name].add_batch(inp[0].data, out.data)
@@ -3141,7 +3149,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", 
-        "gblm-pruner", "pruner-zero", "flap", "admm", "RIA", "alphapruning", "ALPS", "min_recon_error"]
+        "gblm-pruner", "pruner-zero", "flap", "admm", "RIA", "alphapruning", "ALPS", "EBFT", "min_recon_error"]
     )
     parser.add_argument(
         "--model", type=str, help="LlaMA model to load"
@@ -3247,7 +3255,7 @@ if __name__ == "__main__":
     # For ALPS
     parser.add_argument('--rho', type=float, default=300.0, help='initial rho')
     
-    # For Minimize reconstruction Error
+    # For EBFT && Minimize reconstruction Error
     parser.add_argument('--learning_rate', type=float, default=0.0002, help='Learning rate for training.')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay for optimizer.')
     parser.add_argument('--adam_beta1', type=float, default=0.9, help='Beta1 for Adam optimizer.')
@@ -3292,7 +3300,7 @@ if __name__ == "__main__":
 
 
     logger.info(f"loading llm model: {args.model}")
-    model = get_llama(args.model)
+    model = get_llama(args, args.model)
     model.eval()
 
     dataloader, testloader = get_loaders(
@@ -3643,6 +3651,36 @@ if __name__ == "__main__":
         logger.info("Pruning ALPS ...") 
         tick = time.time()
         llama_sequential_ALPS(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("Check sparisity ratio ...")
+        sparsity_ratio = check_sparsity(args, model)
+
+        logger.info("PPL Evaluation")    
+        for dataset in ["wikitext2", "ptb", "c4"]:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            print("Dataset:", dataset)
+            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.save_model:    
+            model.save_pretrained(args.save_model)
+
+    elif args.prune_method == "EBFT":
+        from eval import llama_eval
+
+        logger.info("Pruning EBFT ...") 
+        tick = time.time()
+        if args.initial_method == "magnitude":
+            from prunellm.EBFT.prune_fn import llama_sequential_EBFT_magnitude
+            llama_sequential_EBFT_magnitude(args. model, dataloader, DEV, logger)
+        if args.initial_method == 'sparsegpt':
+            from prunellm.EBFT.prune_fn import llama_sequential_EBFT_sparsegpt
+            llama_sequential_EBFT_sparsegpt(args, model, dataloader, DEV, logger)
+        elif args.initial_method == 'wanda':
+            from prunellm.EBFT.prune_fn import llama_sequential_EBFT_wanda
+            llama_sequential_EBFT_wanda(args, model, dataloader, DEV, logger)
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")

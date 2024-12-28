@@ -7,18 +7,20 @@ Include:
 | Methods                                        | Quantize | PPL Eval | Task Eval | Save |
 | :--------------------------------------------- | :------: | :------: | :-------: | :--: |
 | Magnitude                                      |   yes   |   yes   |   TODO   | yes |
-| [SparseGPT](https://arxiv.org/pdf/2301.00774)     |   yes   |   yes   |   TODO   | yes |
-| [Wanda](https://arxiv.org/pdf/2306.11695)         |   yes   |   yes   |   TODO   | yes |
-| [SparseLLM](https://arxiv.org/pdf/2402.17946)     |   yes   |   yes   |   TODO   | yes |
-| [DSnoT](https://arxiv.org/pdf/2310.08915)         |   yes   |   yes   |   TODO   | yes |
-| [OWL](https://arxiv.org/pdf/2310.05175)           |   yes   |   yes   |   TODO   | yes |
-| [GBLM-Pruner](https://arxiv.org/pdf/2311.04902)   |   yes   |   yes   |   TODO   | yes |
-| [Pruner-Zero](https://arxiv.org/pdf/2406.02924v1) |   yes   |   yes   |   TODO   | yes |
-| [FLAP](https://arxiv.org/pdf/2312.11983)          |   yes   |   yes   |   TODO   | yes |
-| [admm](https://arxiv.org/pdf/2401.02938)          |   yes   |   yes   |   TODO   | yes |
-| [RIA](https://openreview.net/forum?id=Tr0lPx9woF) |   yes   |   yes   |   TODO   | yes |
-| [AlphaPruninig](https://arxiv.org/pdf/2410.10912) |   yes   |   yes   |   TODO   | yes |
-| [ALPS](https://arxiv.org/pdf/2406.07831)          |   yes   |   yes   |   TODO   | yes |
+| [SparseGPT](https://arxiv.org/pdf/2301.00774)      |   yes   |   yes   |   TODO   | yes |
+| [Wanda](https://arxiv.org/pdf/2306.11695)          |   yes   |   yes   |   TODO   | yes |
+| [SparseLLM](https://arxiv.org/pdf/2402.17946)      |   yes   |   yes   |   TODO   | yes |
+| [DSnoT](https://arxiv.org/pdf/2310.08915)          |   yes   |   yes   |   TODO   | yes |
+| [OWL](https://arxiv.org/pdf/2310.05175)            |   yes   |   yes   |   TODO   | yes |
+| [GBLM-Pruner](https://arxiv.org/pdf/2311.04902)    |   yes   |   yes   |   TODO   | yes |
+| [Pruner-Zero](https://arxiv.org/pdf/2406.02924v1)  |   yes   |   yes   |   TODO   | yes |
+| [FLAP](https://arxiv.org/pdf/2312.11983)           |   yes   |   yes   |   TODO   | yes |
+| [admm](https://arxiv.org/pdf/2401.02938)           |   yes   |   yes   |   TODO   | yes |
+| [RIA](https://openreview.net/forum?id=Tr0lPx9woF)  |   yes   |   yes   |   TODO   | yes |
+| [AlphaPruninig](https://arxiv.org/pdf/2410.10912)  |   yes   |   yes   |   TODO   | yes |
+| [ALPS](https://arxiv.org/pdf/2406.07831)           |   yes   |   yes   |   TODO   | yes |
+| [EBFT](https://arxiv.org/pdf/2402.12419)           |   yes   |   yes   |   TODO   | yes |
+| [Min_Recon_Error](https://arxiv.org/pdf/2406.15524)|   yes   |   yes   |   TODO   | yes |
 
 add `--eval_zero_shot` to evaluate
 
@@ -449,6 +451,45 @@ python llama.py \
 --sparsity_type 2:4 \
 --save_model save_models/ALPS/ \
 ```
+
+## EBFT
+#### magnitude based
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method EBFT \
+--initial_method magnitude \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--save_model save_models/EBFT/
+```
+
+#### sparsegpt based
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method EBFT \
+--initial_method sparsegpt \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--save_model save_models/EBFT/
+```
+
+#### wanda based
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method EBFT \
+--initial_method wanda \
+--dataset c4 \
+--sparsity_ratio 0.6 \
+--sparsity_type unstructured \
+--save_model save_models/EBFT/
+```
+
+
 
 ## Rethinking Pruning LLMs
 #### BR
