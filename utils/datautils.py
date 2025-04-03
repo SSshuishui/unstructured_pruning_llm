@@ -12,8 +12,8 @@ def set_seed(seed):
 
 def get_wikitext2(nsamples, seed, seqlen, model):
     
-    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train', cache_dir="/data/huggingface_cache/datasets")
-    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test', cache_dir="/data/huggingface_cache/datasets")
+    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
     trainenc = tokenizer(" ".join(traindata['text']), return_tensors='pt')
@@ -31,8 +31,8 @@ def get_wikitext2(nsamples, seed, seqlen, model):
     return trainloader, testenc
 
 def get_ptb(nsamples, seed, seqlen, model):
-    traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train', cache_dir="/data/huggingface_cache/datasets")
-    testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test', cache_dir="/data/huggingface_cache/datasets")
+    traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train', trust_remote_code=True)
+    testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test', trust_remote_code=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
     trainenc = tokenizer(" ".join(traindata['sentence']), return_tensors='pt')
@@ -51,10 +51,10 @@ def get_ptb(nsamples, seed, seqlen, model):
 
 def get_c4(nsamples, seed, seqlen, model):
     traindata = load_dataset(
-        'bhxiang/c4_calibrate_mini', split='train', cache_dir="/data/huggingface_cache/datasets"
+        'bhxiang/c4_calibrate_mini', split='train'
     )
     valdata = load_dataset(
-        'bhxiang/c4_calibrate_mini', split='validation', cache_dir="/data/huggingface_cache/datasets"
+        'bhxiang/c4_calibrate_mini', split='validation'
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)

@@ -4,23 +4,23 @@ LLM Un-Structured Pruning Methods
 
 Include:
 
-| Methods                                        | Quantize | PPL Eval | Task Eval | Save |
-| :--------------------------------------------- | :------: | :------: | :-------: | :--: |
-| Magnitude                                      |   yes   |   yes   |   TODO   | yes |
-| [SparseGPT](https://arxiv.org/pdf/2301.00774)      |   yes   |   yes   |   TODO   | yes |
-| [Wanda](https://arxiv.org/pdf/2306.11695)          |   yes   |   yes   |   TODO   | yes |
-| [SparseLLM](https://arxiv.org/pdf/2402.17946)      |   yes   |   yes   |   TODO   | yes |
-| [DSnoT](https://arxiv.org/pdf/2310.08915)          |   yes   |   yes   |   TODO   | yes |
-| [OWL](https://arxiv.org/pdf/2310.05175)            |   yes   |   yes   |   TODO   | yes |
-| [GBLM-Pruner](https://arxiv.org/pdf/2311.04902)    |   yes   |   yes   |   TODO   | yes |
-| [Pruner-Zero](https://arxiv.org/pdf/2406.02924v1)  |   yes   |   yes   |   TODO   | yes |
-| [FLAP](https://arxiv.org/pdf/2312.11983)           |   yes   |   yes   |   TODO   | yes |
-| [admm](https://arxiv.org/pdf/2401.02938)           |   yes   |   yes   |   TODO   | yes |
-| [RIA](https://openreview.net/forum?id=Tr0lPx9woF)  |   yes   |   yes   |   TODO   | yes |
-| [AlphaPruninig](https://arxiv.org/pdf/2410.10912)  |   yes   |   yes   |   TODO   | yes |
-| [ALPS](https://arxiv.org/pdf/2406.07831)           |   yes   |   yes   |   TODO   | yes |
-| [EBFT](https://arxiv.org/pdf/2402.12419)           |   yes   |   yes   |   TODO   | yes |
-| [Min_Recon_Error](https://arxiv.org/pdf/2406.15524)|   yes   |   yes   |   TODO   | yes |
+| Methods                                          | Quantize | PPL Eval | Task Eval | Save |
+| :----------------------------------------------- | :------: | :------: | :-------: | :--: |
+| Magnitude                                        |   yes   |   yes   |   TODO   | yes |
+| [SparseGPT](https://arxiv.org/pdf/2301.00774)       |   yes   |   yes   |   TODO   | yes |
+| [Wanda](https://arxiv.org/pdf/2306.11695)           |   yes   |   yes   |   TODO   | yes |
+| [SparseLLM](https://arxiv.org/pdf/2402.17946)       |   yes   |   yes   |   TODO   | yes |
+| [DSnoT](https://arxiv.org/pdf/2310.08915)           |   yes   |   yes   |   TODO   | yes |
+| [OWL](https://arxiv.org/pdf/2310.05175)             |   yes   |   yes   |   TODO   | yes |
+| [GBLM-Pruner](https://arxiv.org/pdf/2311.04902)     |   yes   |   yes   |   TODO   | yes |
+| [Pruner-Zero](https://arxiv.org/pdf/2406.02924v1)   |   yes   |   yes   |   TODO   | yes |
+| [FLAP](https://arxiv.org/pdf/2312.11983)            |   yes   |   yes   |   TODO   | yes |
+| [admm](https://arxiv.org/pdf/2401.02938)            |   yes   |   yes   |   TODO   | yes |
+| [RIA](https://openreview.net/forum?id=Tr0lPx9woF)   |   yes   |   yes   |   TODO   | yes |
+| [AlphaPruninig](https://arxiv.org/pdf/2410.10912)   |   yes   |   yes   |   TODO   | yes |
+| [ALPS](https://arxiv.org/pdf/2406.07831)            |   yes   |   yes   |   TODO   | yes |
+| [EBFT](https://arxiv.org/pdf/2402.12419)            |   yes   |   yes   |   TODO   | yes |
+| [Min_Recon_Error](https://arxiv.org/pdf/2406.15524) |   yes   |   yes   |   TODO   | yes |
 
 add `--eval_zero_shot` to evaluate
 
@@ -39,12 +39,13 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio .5 \
 --sparsity_type unstructured \
---gmp
+--gmp \
+--save
 ```
 
 ## SparseGPT
 
-#### Prune to 50\% uniform sparsity
+#### unstructured
 
 ```
 python llama.py \
@@ -53,7 +54,7 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type unstructured \
---save_model save_models/sparsegpt/
+--save 
 ```
 
 #### Prune to full 2:4 sparsity
@@ -65,7 +66,7 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/sparsegpt/
+--save
 ```
 
 #### Prune to 50\% + 4-bit
@@ -78,10 +79,21 @@ python llama.py \
 --sparsity_ratio 0.5 \
 --sparsity_type unstructured \
 --wbits 4 \
---save_model save_models/sparsegpt/
+--save
 ```
 
 ## Wanda
+#### unstructured
+
+```
+python llama.py \
+--model /PATH/TO/LLAMA3/ \
+--prune_method wanda \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type unstructured \
+--save 
+```
 
 #### For structured N:M sparsity, "2:4" or "4:8"
 
@@ -92,7 +104,7 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/wanda/ 
+--save 
 ```
 
 #### For unstructured 50% sparsity
@@ -106,7 +118,7 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type unstructured \
---save_model save_models/wanda/ 
+--save 
 ```
 
 ## SparseLLM
@@ -122,8 +134,8 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.7 \
 --sparsity_type unstructured \
---save_model save_models/sparsellm/ \
---nsamples 16
+--nsamples 16 \
+--save
 ```
 
 #### For structured N:M sparsity, "2:4" or "4:8"
@@ -135,13 +147,16 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/sparsellm/ \
---nsamples 16
+--nsamples 16 \
+--save 
 ```
 
 ## DSnoT
 
-#### For unstructured sparsity
+* Due to 4090 only have 24G, need to minimize nsamples for running.
+
+#### For unstructured sparsity 
+##### initial_method: sparsegpt | wanda
 
 ```
 python llama.py \
@@ -153,7 +168,8 @@ python llama.py \
 --sparsity_type unstructured \
 --max_cycle_time 50 \
 --update_threshold 0.1 \
---pow_of_var_regrowing 1
+--pow_of_var_regrowing 1 \
+--save
 ```
 
 #### For structured N:M sparsity, "2:4" or "4:8"
@@ -168,25 +184,13 @@ python llama.py \
 --sparsity_type 2:4 \
 --max_cycle_time 50 \
 --update_threshold 0.1 \
---pow_of_var_regrowing 1
+--pow_of_var_regrowing 1 \
+--save
 ```
 
 ## OWL
 
-#### For OWL-Magnitude
-
-```
-python  llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method owl \
---dataset c4 \
---initial_method magnitude \
---sparsity_ratio 0.7 \
---sparsity_type unstructured \
---Lamda 0.08 \
---Hyper_m 5 \
---save_model save_models/OWL/magnitude/ 
-```
+* Due to 4090 only have 24G, need to minimize nsamples for running.
 
 #### For OWL-SparseGPT
 
@@ -200,16 +204,14 @@ python  llama.py \
 --sparsity_type unstructured \
 --Lamda 0.08 \
 --Hyper_m 5 \
---save_model save_models/OWL/sparsegpt/ \
---nsamples 16
+--nsamples 16 \
+--save
 ```
 
 #### For OWL-Wanda
 
-add `--use_variant` for wanda variant
-
 ```
-python  llama.py \
+python llama.py \
 --model /PATH/TO/LLAMA2/ \
 --prune_method owl \
 --dataset c4 \
@@ -218,7 +220,7 @@ python  llama.py \
 --sparsity_type unstructured \
 --Lamda 0.08 \
 --Hyper_m 5 \
---save_model save_models/OWL/wanda/ 
+--save
 ```
 
 ```
@@ -227,11 +229,55 @@ python  llama.py \
 --prune_method owl \
 --dataset c4 \
 --initial_method wanda \
---sparsity_ratio 0.7 \
+--sparsity_ratio 0.5 \
 --sparsity_type "4:8" \
 --Lamda 0.08 \
 --Hyper_m 5 \
---save_model save_models/OWL/wanda/ 
+--save
+```
+
+## Gradient
+
+#### 1. Computate of gradient magnitude for calculation of pruning metric
+
+```
+python gradient_computation.py \
+--nsamples 128 \
+--model /PATH/TO/LLAMA2/ \
+--llama_version 2 \
+--task gradient
+```
+
+#### 2. For unstructured pruning
+
+* Due to 4090 only have 24G, need to minimize nsamples for running.
+
+  add `--use_variant` for wanda variant
+
+```
+python  llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method gradient \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type unstructured \
+--gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
+--nsamples 16 \
+--save 
+```
+
+#### For structured N:M sparsity, "2:4" or "4:8"
+
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method gradient \
+--dataset c4 \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
+--gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
+--nsamples 16 \
+--save 
 ```
 
 ## GBLM-Pruner
@@ -248,7 +294,9 @@ python gradient_computation.py \
 
 #### 2. For unstructured pruning
 
-   add `--use_variant` for wanda variant
+* Due to 4090 only have 24G, need to minimize nsamples for running.
+
+  add `--use_variant` for wanda variant
 
 ```
 python  llama.py \
@@ -257,9 +305,9 @@ python  llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type unstructured \
---save_model save_models/gblm_pruner/ \
 --gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
---nsamples 16
+--nsamples 16 \
+--save 
 ```
 
 #### For structured N:M sparsity, "2:4" or "4:8"
@@ -271,9 +319,9 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/gblm_pruner/ \
 --gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
---nsamples 16
+--nsamples 16 \
+--save 
 ```
 
 ## Pruner-Zero
@@ -290,7 +338,9 @@ python gradient_computation.py
 
 #### 2.For unstructured pruning
 
-   add `--use_variant` for wanda variant
+* Due to 4090 only have 24G, need to minimize nsamples for running.
+
+  add `--use_variant` for wanda variant
 
 ```
 python  llama.py \
@@ -299,9 +349,9 @@ python  llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type unstructured \
---save_model save_models/pruner_zero/ \
 --gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
---nsamples 16 
+--nsamples 16 \
+--save 
 ```
 
 #### For structured N:M sparsity, "2:4" or "4:8"
@@ -313,30 +363,33 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/pruner_zero/ \
 --gradient_path ./gradients/llama2/gradients_aggregrate_norm_l1_model_llama2-7b-hf_128_0.pth \
---nsamples 16
+--nsamples 16 \
+--save  
 ```
 
 ## FLAP
 
 #### For unstructured sparsity
+
 ```
 python llama.py \
 --model /PATH/TO/LLAMA2/ \
 --prune_method flap \
 --dataset c4 \
 --sparsity_ratio 0.2 \
+--sparsity_type unstructured \
 --remove_heads -1 \
 --metrics WIFV \
 --structure AL-AM \
 --nsamples 1024 \
---save_model save_models/flap/ \
+--save 
 ```
 
 ## Admm
 
 #### For unstructured sparsity
+
 ```
 python llama.py  \
 --model /PATH/TO/LLAMA2/  \
@@ -344,7 +397,7 @@ python llama.py  \
 --dataset c4  \
 --sparsity_ratio 0.6  \
 --sparsity_type unstructured  \
---save_model save_models/admm/ \
+--save 
 ```
 
 #### For structured N:M sparsity, "2:4" or "4:8"
@@ -356,12 +409,13 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/admm/ \
+--save 
 ```
 
 ## RIA (Relative Importance and Activations)
 
 #### For unstructured sparsity
+
 ```
 python llama.py \
 --model /PATH/TO/LLAMA2/ \
@@ -369,8 +423,9 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.6 \
 --sparsity_type unstructured \
---save_model save_models/RIA/ \
+--save 
 ```
+
 #### For structured N:M sparsity, "2:4" or "4:8"
 
 ```
@@ -380,26 +435,13 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/RIA/ \
+--save 
 ```
 
 ## AlphaPruning
 
-#### magnitude based
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method alphapruning \
---initial_method magnitude \
---dataset c4 \
---sparsity_ratio 0.6 \
---sparsity_type unstructured \
---ww_metric alpha_peak \
---epsilon 0.3 \
---save_model save_models/alphapruning/
-```
-
-#### wanda based
+#### unstructured
+##### initial_method: sparsegpt | wanda
 ```
 python llama.py \
 --model /PATH/TO/LLAMA2/ \
@@ -410,26 +452,31 @@ python llama.py \
 --sparsity_type unstructured \
 --ww_metric alpha_peak \
 --epsilon 0.3 \
---save_model save_models/alphapruning/
+--save
 ```
 
-#### sparsegpt based
+#### structured
 ```
 python llama.py \
 --model /PATH/TO/LLAMA2/ \
 --prune_method alphapruning \
---initial_method sparsegpt \
+--initial_method wanda \
 --dataset c4 \
---sparsity_ratio 0.6 \
---sparsity_type unstructured \
+--sparsity_ratio 0.5 \
+--sparsity_type 2:4 \
 --ww_metric alpha_peak \
 --epsilon 0.3 \
---save_model save_models/alphapruning/
+--save
 ```
+
+
 
 ## ALPS
 
 #### For unstructured sparsity
+
+* Due to 4090 only have 24G, need to minimize nsamples for running.
+
 ```
 python llama.py \
 --model /PATH/TO/LLAMA2/ \
@@ -437,7 +484,7 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.6 \
 --sparsity_type unstructured \
---save_model save_models/ALPS/ \
+--save 
 ```
 
 #### For structured N:M sparsity, "2:4" or "4:8"
@@ -449,82 +496,18 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type 2:4 \
---save_model save_models/ALPS/ \
-```
-
-## EBFT
-#### magnitude based
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method EBFT \
---initial_method magnitude \
---dataset c4 \
---sparsity_ratio 0.6 \
---sparsity_type unstructured \
---save_model save_models/EBFT/
-```
-
-#### sparsegpt based
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method EBFT \
---initial_method sparsegpt \
---dataset c4 \
---sparsity_ratio 0.6 \
---sparsity_type unstructured \
---save_model save_models/EBFT/
-```
-
-#### wanda based
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method EBFT \
---initial_method wanda \
---dataset c4 \
---sparsity_ratio 0.6 \
---sparsity_type unstructured \
---save_model save_models/EBFT/
+--save 
 ```
 
 
+## MixGPT
 
-## Rethinking Pruning LLMs
-#### BR
 ```
 python llama.py \
 --model /PATH/TO/LLAMA2/ \
---prune_method min_recon_error \
---initial_method sparsegpt \
+--prune_method MixGPT \
 --dataset c4 \
 --sparsity_ratio 0.6 \
 --sparsity_type unstructured \
---save_model save_models/min_recon_error/br/
-```
-#### BR + GP
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method min_recon_error \
---initial_method sparsegpt \
---dataset c4 \
---sparsity_ratio 0.6 \
---sparsity_type unstructured \
---user_gp \
---save_model save_models/min_recon_error/br_gp/
-```
-#### BR + GP + CR
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method min_recon_error \
---initial_method sparsegpt \
---dataset c4 \
---sparsity_ratio 0.6 \
---sparsity_type unstructured \
---use_gp \
---use_cr \
---save_model save_models/min_recon_error/br_gp_cr/
+--save
 ```

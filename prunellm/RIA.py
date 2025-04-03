@@ -6,6 +6,19 @@ import torch.nn as nn
 import transformers
 from .quant import *
 
+def lexsort(keys, dim=-1):
+    idx = keys[0].argsort(dim=dim, stable=True)
+    for k in keys[1:]:
+        idx = idx.gather(dim, k.gather(dim, idx).argsort(dim=dim, stable=True))
+    
+    return idx
+
+def maximize_total_value(matrix):
+    # linear_sum_assignment
+    row_indices, col_indices = linear_sum_assignment(matrix, maximize=True) 
+    return col_indices
+
+
 # Define WrappedGPT class
 class RIAGPT:
     """

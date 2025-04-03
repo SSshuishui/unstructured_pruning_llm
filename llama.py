@@ -6,6 +6,10 @@ from pathlib import Path
 import numpy as np
 import math
 import transformers
+import gc
+
+import os
+os.environ["HF_DATASETS_TRUST_REMOTE_CODE"] = "1"
 
 from utils.logutils import create_logger
 from utils.datautils import get_loaders
@@ -19,20 +23,11 @@ def get_llama(args, model):
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    if args.prune_method in ["EBFT", "min_recon_error"]:
-        from prunellm.EBFT.modeling_llama import LlamaForCausalLM
-        model = LlamaForCausalLM.from_pretrained(
-            model, 
-            torch_dtype=torch.float32, 
-            device_map='auto',
-        )
-        model.seqlen = model.config.max_position_embeddings 
-        return model
-    else:
-        from transformers import LlamaForCausalLM
-        model = LlamaForCausalLM.from_pretrained(model, device_map='auto', torch_dtype='auto')
-        model.seqlen = 2048
-        return model
+    
+    from transformers import LlamaForCausalLM
+    model = LlamaForCausalLM.from_pretrained(model, device_map='auto', torch_dtype='auto')
+    model.seqlen = 2048
+    return model
 
 
 def llama_sequential_magnitude(args, model, dataloader, dev, logger, ratios=None):
@@ -41,6 +36,7 @@ def llama_sequential_magnitude(args, model, dataloader, dev, logger, ratios=None
     layers = model.model.layers 
 
     hf_device_map = model.hf_device_map
+    logger.info("hf_device_map: ", hf_device_map)
 
     if ratios is None:
         ratios = [args.sparsity_ratio for i in range(len(layers))]
@@ -48,7 +44,7 @@ def llama_sequential_magnitude(args, model, dataloader, dev, logger, ratios=None
     k = 0
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         subset = find_layers(layer)
 
@@ -120,16 +116,16 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger, ratios=None
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     if ratios is None:
-        ratios = [args.sparsity_ratio for i in range(len(layers))]
+        layer_num = len(find_layers(layers))
+        ratios = [args.sparsity_ratio for i in range(layer_num)]
 
-    quantizers = {}
     k=0
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -172,7 +168,8 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger, ratios=None
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                with torch.no_grad():
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
             for h in handles:
                 h.remove()
 
@@ -189,7 +186,8 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger, ratios=None
                 k += 1
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -251,15 +249,16 @@ def llama_sequential_wanda(args, model, dataloader, dev, logger, ratios=None):
     logger.info('Ready.')
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     if ratios is None:
-        ratios = [args.sparsity_ratio for i in range(len(layers))]
+        layer_num = len(find_layers(layers))
+        ratios = [args.sparsity_ratio for i in range(layer_num)]
+    
     k=0
-
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -343,6 +342,7 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
 
     model.model.embed_tokens = model.model.embed_tokens.to(dev)
     model.model.norm = model.model.norm.to(dev)
+    model.model.rotary_emb   = model.model.rotary_emb.to(dev)  # crucial fix
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -372,8 +372,8 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.norm = model.model.norm.cpu()
+    # model.model.embed_tokens = model.model.embed_tokens.cpu()
+    # model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
     
     outs = torch.zeros_like(inps)
@@ -383,11 +383,11 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
     logger.info('Ready.')
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -428,9 +428,24 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                # e.g. hidden_states: (1, seq_len, hidden_size)
+                hidden_states = inps[j].unsqueeze(0).to(dev)
+
+                # Build position_ids on the same device
+                seq_len = hidden_states.shape[1]
+                position_ids = torch.arange(seq_len, device=dev).unsqueeze(0)
+
+                # This returns a 2-tuple (cos, sin)
+                cos_sin_tuple = model.model.rotary_emb(hidden_states, position_ids)
+
+                # Pass that tuple as position_embeddings
+                with torch.no_grad():
+                    outs[j] = layer(hidden_states, attention_mask=attention_mask, position_embeddings=cos_sin_tuple)[0]
             for h in handles:
                 h.remove()
+            model.model.embed_tokens = model.model.embed_tokens.cpu()
+            model.model.norm         = model.model.norm.cpu()
+            model.model.rotary_emb   = model.model.rotary_emb.cpu()
 
             target_layer_names = ["mlp.up_proj", "mlp.gate_proj", "mlp.down_proj"]
 
@@ -582,7 +597,7 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
                 # Activation formulate
                 m3 = beta * torch.matmul(next_weight.T, Y)
                 m4 = gamma * layer_nl_output
-                af = m3 + m4
+                af = (m3 + m4).to(dtype=torch.float16)
 
                 p = torch.matmul(av, af)
 
@@ -644,7 +659,8 @@ def llama_sequential_sparsellm(args, model, dataloader, dev, logger):
                 training_loss['train_loss'].append(tmp_training_loss.item())
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -704,11 +720,11 @@ def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
     logger.info('Ready.')
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -731,7 +747,8 @@ def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
 
@@ -1114,7 +1131,7 @@ def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
     torch.cuda.empty_cache()
 
 
-def llama_sequential_owl_magnitude(args, model, dataloader, dev, logger):
+def owl_layer_ratio_compute(args, model, dataloader, dev, logger):
     logger.info("Starting...")
 
     all_layer_ratio=[]
@@ -1131,7 +1148,7 @@ def llama_sequential_owl_magnitude(args, model, dataloader, dev, logger):
         (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
     cache = {"i": 0, "attention_mask": None}
-    
+
     class Catcher(nn.Module):
         def __init__(self, module):
             super().__init__()
@@ -1143,7 +1160,6 @@ def llama_sequential_owl_magnitude(args, model, dataloader, dev, logger):
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
             raise ValueError
-
     layers[0] = Catcher(layers[0])
 
     for batch in dataloader:
@@ -1162,12 +1178,11 @@ def llama_sequential_owl_magnitude(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info(f"hf_device_map: {hf_device_map}")
 
-    quantizers = {}
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -1208,54 +1223,23 @@ def llama_sequential_owl_magnitude(args, model, dataloader, dev, logger):
         for out_ratio in [args.Hyper_m]:
             out_ratio_layer=check_outlier_mean(layer_wmetric, out_ratio)
             print("layer outlier ratio", out_ratio, out_ratio_layer)
-        
         all_layer_ratio.append(out_ratio_layer)
 
-    logger.info("before adjustment", all_layer_ratio)
+    logger.info(f"before adjustment: {all_layer_ratio}")
 
     all_layer_ratio=np.array(all_layer_ratio)
     all_layer_ratio = ((all_layer_ratio - all_layer_ratio.min()) * (1/(all_layer_ratio.max() - all_layer_ratio.min()) * args.Lamda*2))
     all_layer_ratio=all_layer_ratio - np.mean(all_layer_ratio) + (1-args.sparsity_ratio)
     print(all_layer_ratio, np.mean(all_layer_ratio), np.max(all_layer_ratio), np.min(all_layer_ratio))
     
-    logger.info("after adjustment", all_layer_ratio)
+    logger.info(f"after adjustment: {all_layer_ratio}")
 
     model.config.use_cache = use_cache 
+    del wrapped_layers, layer
+    del inps, outs
     torch.cuda.empty_cache()
-
-    ############################ prune ############################
-    logger.info('Pruning Starting ...')
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-
-    layers = model.model.layers
-
-    hf_device_map = model.hf_device_map
-
-    for i in range(len(layers)):
-        logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
-        layer = layers[i].to(hf_device)
-        subset = find_layers(layer)
-
-        for name in subset:
-            layer_sparsity_ratio= 1-all_layer_ratio[i]
-
-            W = subset[name].weight.data 
-            W_metric = torch.abs(W)
-            if args.prune_n != 0:
-                W_mask = (torch.zeros_like(W)==1)
-                for ii in range(W_metric.shape[1]):
-                    if ii % args.prune_m == 0:
-                        tmp = W_metric[:, ii:(ii+args.prune_m)].float()
-                        W_mask.scatter_(1, ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
-            else:
-                thresh = torch.sort(W_metric.flatten().cuda())[0][int(W.numel()*args.sparsity_ratio)].cpu()
-                W_mask = (W_metric<=thresh)
-
-            W[W_mask] = 0
-
-    torch.cuda.empty_cache()
+    gc.collect()
+    return all_layer_ratio
 
 
 def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
@@ -1287,7 +1271,6 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
             raise ValueError
-
     layers[0] = Catcher(layers[0])
 
     for batch in dataloader:
@@ -1306,12 +1289,11 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info(f"hf_device_map: {hf_device_map}")
 
-    quantizers = {}
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -1352,22 +1334,18 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
         for out_ratio in [args.Hyper_m]:
             out_ratio_layer=check_outlier_mean(layer_wmetric, out_ratio)
             print("layer outlier ratio", out_ratio, out_ratio_layer)
-        
         all_layer_ratio.append(out_ratio_layer)
 
-    logger.info("before adjustment", all_layer_ratio)
+    logger.info(f"before adjustment: {all_layer_ratio}")
 
     all_layer_ratio=np.array(all_layer_ratio)
     all_layer_ratio = ((all_layer_ratio - all_layer_ratio.min()) * (1/(all_layer_ratio.max() - all_layer_ratio.min()) * args.Lamda*2))
     all_layer_ratio=all_layer_ratio - np.mean(all_layer_ratio) + (1-args.sparsity_ratio)
     print(all_layer_ratio, np.mean(all_layer_ratio), np.max(all_layer_ratio), np.min(all_layer_ratio))
     
-    logger.info("after adjustment", all_layer_ratio)
+    logger.info(f"after adjustment: {all_layer_ratio}")
 
-    model.config.use_cache = use_cache 
-    torch.cuda.empty_cache()
 
-    ############################ prune ############################
     logger.info('Pruning Starting ...')
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -1379,7 +1357,7 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
         (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
-
+    
     layers[0] = Catcher(layers[0])
 
     for batch in dataloader:
@@ -1397,9 +1375,12 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
     position_ids = cache['position_ids']
 
     logger.info('Ready.')
+    hf_device_map = model.hf_device_map
+    logger.info(f"hf_device_map: {hf_device_map}")
+
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -1423,7 +1404,8 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
         
@@ -1440,7 +1422,8 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
             gpts[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         layers[i] = layer.cpu()
         del layer
         del gpts
@@ -1481,7 +1464,6 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
             raise ValueError
-
     layers[0] = Catcher(layers[0])
 
     for batch in dataloader:
@@ -1500,11 +1482,11 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info(f"hf_device_map: {hf_device_map}")
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -1547,19 +1529,15 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
             print("layer outlier ratio", out_ratio, out_ratio_layer)
         all_layer_ratio.append(out_ratio_layer)
 
-    logger.info("before adjustment", all_layer_ratio)
+    logger.info(f"before adjustment: {all_layer_ratio}")
 
     all_layer_ratio=np.array(all_layer_ratio)
     all_layer_ratio = ((all_layer_ratio - all_layer_ratio.min()) * (1/(all_layer_ratio.max() - all_layer_ratio.min()) * args.Lamda*2))
     all_layer_ratio=all_layer_ratio - np.mean(all_layer_ratio) + (1-args.sparsity_ratio)
     print(all_layer_ratio, np.mean(all_layer_ratio), np.max(all_layer_ratio), np.min(all_layer_ratio))
     
-    logger.info("after adjustment", all_layer_ratio)
-
-    model.config.use_cache = use_cache 
-    torch.cuda.empty_cache()
-
-    ############################ prune ############################
+    logger.info(f"after adjustment: {all_layer_ratio}")
+    
     logger.info('Pruning Starting ...')
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -1571,7 +1549,7 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
         (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
-
+    
     layers[0] = Catcher(layers[0])
 
     for batch in dataloader:
@@ -1580,6 +1558,7 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
         except ValueError:
             pass
     layers[0] = layers[0].module
+
     model.model.embed_tokens = model.model.embed_tokens.cpu()
     model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
@@ -1589,9 +1568,12 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
     position_ids = cache['position_ids']
 
     logger.info('Ready.')
+    hf_device_map = model.hf_device_map
+    logger.info(f"hf_device_map: {hf_device_map}")
+    
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -1611,7 +1593,8 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
         for name in wrapped_layers:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
         
@@ -1660,7 +1643,8 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
             subset[name].weight.data[W_mask] = 0 # set the pruned weights to zero        
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         layers[i] = layer.cpu()
         del layer
         del wrapped_layers
@@ -1701,7 +1685,6 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
             raise ValueError
-
     layers[0] = Catcher(layers[0])
 
     for batch in dataloader:
@@ -1720,12 +1703,11 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info(f"hf_device_map: {hf_device_map}")
 
-    quantizers = {}
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -1766,24 +1748,19 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
         for out_ratio in [args.Hyper_m]:
             out_ratio_layer=check_outlier_mean(layer_wmetric, out_ratio)
             print("layer outlier ratio", out_ratio, out_ratio_layer)
-        
         all_layer_ratio.append(out_ratio_layer)
 
-    logger.info("before adjustment", all_layer_ratio)
+    logger.info(f"before adjustment: {all_layer_ratio}")
 
     all_layer_ratio=np.array(all_layer_ratio)
-    all_layer_ratio = ((all_layer_ratio - all_layer_ratio.min()) * (1/(all_layer_ratio.max() - all_layer_ratio.min()) * args.Lamda))
-    all_layer_ratio=all_layer_ratio - np.mean(all_layer_ratio)
+    all_layer_ratio = ((all_layer_ratio - all_layer_ratio.min()) * (1/(all_layer_ratio.max() - all_layer_ratio.min()) * args.Lamda*2))
+    all_layer_ratio=all_layer_ratio - np.mean(all_layer_ratio) + (1-args.sparsity_ratio)
+
     all_layer_ratio=np.round(all_layer_ratio)
     all_layer_ratio=args.prune_n - all_layer_ratio
-    print(all_layer_ratio, np.mean(all_layer_ratio), np.max(all_layer_ratio), np.min(all_layer_ratio))
     
-    logger.info("after adjustment", all_layer_ratio)
+    logger.info(f"after adjustment: {all_layer_ratio}")
 
-    model.config.use_cache = use_cache 
-    torch.cuda.empty_cache()
-
-    ############################ prune ############################
     logger.info('Pruning Starting ...')
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -1813,16 +1790,18 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
     position_ids = cache['position_ids']
 
     logger.info('Ready.')
+    hf_device_map = model.hf_device_map
+    logger.info(f"hf_device_map: {hf_device_map}")
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
 
         subset = find_layers(layer)
 
-        args.prune_n = int(all_layer_ratio [i])
+        args.prune_n = int(all_layer_ratio[i])
         print('Layer {} prune_n {} prune_m {}'.format(i, args.prune_n, args.prune_m))
 
         wrapped_layers = {}
@@ -1838,7 +1817,8 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
         
@@ -1862,7 +1842,8 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
             subset[name].weight.data[W_mask] = 0 # set the pruned weights to zero        
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         layers[i] = layer.cpu()
         del layer
         del wrapped_layers
@@ -1876,8 +1857,6 @@ def llama_sequential_owl_wanda_structure(args, model, dataloader, dev, logger):
 
 def llama_sequential_prunerzero(args, model, dataloader, dev, logger, engine=None):
     logger.info("Starting...")
-
-
 
     # Load gradients
     with open(args.gradient_path, 'rb') as file:
@@ -1930,11 +1909,11 @@ def llama_sequential_prunerzero(args, model, dataloader, dev, logger, engine=Non
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -1955,7 +1934,8 @@ def llama_sequential_prunerzero(args, model, dataloader, dev, logger, engine=Non
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
 
@@ -2013,7 +1993,8 @@ def llama_sequential_prunerzero(args, model, dataloader, dev, logger, engine=Non
             subset[name].weight.data[W_mask] = 0
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -2032,10 +2013,10 @@ def llama_sequential_gradient(args, model, dataloader, dev, logger):
         gradients = torch.load(args.gradient_path, map_location=torch.device('cpu')) 
     
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     for i in range(len(layers)):
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         subset = find_layers(layer)
 
@@ -2113,12 +2094,12 @@ def llama_sequential_gblm_pruner(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     quantizers = {}
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -2256,11 +2237,11 @@ def llama_sequential_flap(args, model, dataloader, dev, logger):
     attn_mask, mlp_mask = [], []
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -2416,12 +2397,12 @@ def llama_sequential_admm(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     quantizers = {}
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -2440,7 +2421,8 @@ def llama_sequential_admm(args, model, dataloader, dev, logger):
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
 
@@ -2456,7 +2438,8 @@ def llama_sequential_admm(args, model, dataloader, dev, logger):
             gpts[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -2519,12 +2502,12 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     quantizers = {}
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -2548,7 +2531,8 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
         for name in subset:
             handles.append(subset[name].register_forward_hook(add_batch(name)))
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
         for h in handles:
             h.remove()
 
@@ -2603,7 +2587,7 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
                     
                     # channel reallocation
                     index = torch.zeros_like(sorted_idx)
-                    for ii in range(1, prune_m+1):
+                    for ii in range(1, args.prune_m+1):
                         if ii % 2 == 1:
                             index[ii-1::args.prune_m] = sorted_idx[int(W_metric.shape[1]* (ii-1)/args.prune_m) :int(W_metric.shape[1]* ii/args.prune_m)]
                         else:
@@ -2611,7 +2595,7 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
         
                     W_metric_resort = W_metric[:, index].clone()
                     
-                    W_strip_value = torch.zeros(W_metric.shape[1]//args.prune_m).to(device)
+                    W_strip_value = torch.zeros(W_metric.shape[1]//args.prune_m).to(hf_device)
                     W_mask_permute = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
                     for ii in range(W_metric.shape[1]):
                         if ii % args.prune_m == 0:
@@ -2692,7 +2676,7 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
                             for ii in range(W_metric.shape[1]):
                                 if ii % args.prune_m == 0:
                                     tmp = W_metric_permute[:,ii:(ii+args.prune_m)].float()
-                                    W_mask_permute.scatter_(1,ii+torch.topk(tmp, prune_n,dim=1, largest=False)[1], True)
+                                    W_mask_permute.scatter_(1,ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
                                     W_metric_strip = W_metric_permute[:, ii:(ii+args.prune_m)]
                                     W_strip_value[ii//args.prune_m] = torch.sum(W_metric_strip[W_mask_permute[:, ii:(ii+args.prune_m)]==0])
                             print("The total value after linear sum assignment round {}: {}, running time: {}s".format(z, torch.sum(W_strip_value.type(torch.float32)).item(), round(t2-t1, 2)))
@@ -2712,9 +2696,9 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
                     # Directly N:M
                     W_mask = (torch.zeros_like(W_metric) == 1)
                     for ii in range(W_metric.shape[1]):
-                        if ii % prune_m == 0:
-                            tmp = W_metric[:,ii:(ii+prune_m)].float()
-                            W_mask.scatter_(1,ii+torch.topk(tmp, prune_n,dim=1, largest=False)[1], True)
+                        if ii % args.prune_m == 0:
+                            tmp = W_metric[:,ii:(ii+args.prune_m)].float()
+                            W_mask.scatter_(1,ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
                     
                     subset[name].weight.data[W_mask] = 0
             else:
@@ -2728,7 +2712,7 @@ def llama_sequential_RIA(args, model, dataloader, dev, logger):
                     W_mask = (W_metric<=thresh)
                     
                 if args.reconstruction:
-                    wrapped_layers[name].fasterprune(args.sparsity_ratio, mask=W_mask)
+                    gpts[name].fasterprune(args.sparsity_ratio, mask=W_mask)
                 else:
                     subset[name].weight.data[W_mask] = 0  ## set weights to zero 
             gpts[name].free()
@@ -2791,11 +2775,11 @@ def llama_sequential_ALPS(args, model, dataloader, dev, logger):
     logger.info("Ready.")
 
     hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
+    logger.info("hf_device_map: ", hf_device_map)
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -2820,7 +2804,8 @@ def llama_sequential_ALPS(args, model, dataloader, dev, logger):
             for name in subset:
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+                with torch.no_grad():
+                    outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
             for h in handles:
                 h.remove()
 
@@ -2836,7 +2821,8 @@ def llama_sequential_ALPS(args, model, dataloader, dev, logger):
                 gpts[name].free()
 
         for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
 
         layers[i] = layer.cpu()
         del layer
@@ -2847,216 +2833,6 @@ def llama_sequential_ALPS(args, model, dataloader, dev, logger):
 
     model.config.use_cache = use_cache
 
-
-def llama_sequential_min_recon_error(args, model, dataloader, dev, logger):
-    logger.info("Starting...")
-
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-    layers = model.model.layers
-
-    prune_nsamples = args.nsamples
-
-    model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.norm = model.model.norm.to(dev)
-    layers[0] = layers[0].to(dev)
-
-    dtype = torch.float32
-    inps = torch.zeros(
-        (prune_nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
-    )
-    cache = {"i": 0, "attention_mask": None}
-
-    class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
-            self.module = module
-
-        def forward(self, inp, **kwargs):
-            inps[cache["i"]] = inp
-            cache["i"] += 1
-            cache["attention_mask"] = kwargs["attention_mask"]
-            cache["position_ids"] = kwargs["position_ids"]
-            raise ValueError
-        
-    layers[0] = Catcher(layers[0])
-    for batch in dataloader:
-        try:
-            model(batch[0].to(dev))
-        except ValueError:
-            pass
-    layers[0] = layers[0].module
-
-    layers[0] = layers[0].cpu()
-    model.model.embed_tokens = model.model.embed_tokens.cpu()
-    model.model.norm = model.model.norm.cpu()
-    torch.cuda.empty_cache()
-
-    outs = torch.zeros_like(inps)
-    attention_mask = cache['attention_mask']
-    position_ids = cache['position_ids']
-
-    logger.info("Ready.")
-
-    dense_inps = inps.clone()
-    dense_outs = torch.zeros_like(inps)
-
-    if args.initial_method == 'magnitude':
-        from prunellm.min_recon_error.prune_fn import prune_magnitude
-        prune_fn = prune_magnitude
-    elif args.initial_method == 'wanda':
-        from prunellm.min_recon_error.prune_fn import prune_wanda
-        prune_fn = prune_wanda
-    elif args.initial_method == 'sparsegpt':
-        from prunellm.min_recon_error.prune_fn import prune_sparsegpt
-        prune_fn = prune_sparsegpt
-    
-    dense_layers = []
-
-    if args.use_cr:
-        update_round = len(layers) + 1
-        update_start = -1
-    else:
-        update_round = 1
-        update_start = 0
-
-    hf_device_map = model.hf_device_map
-    logger.info(hf_device_map)
-
-    for i in range(update_start, update_start + update_round):
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
-        layer = layers[i].to(hf_device)
-        inps = inps.to(hf_device)
-        position_ids = position_ids.to(hf_device)
-        
-        if args.use_cr:
-            if i == -1:
-                logger.info(f'pruning layer {i + 1}')
-            elif i == (len(layers) - 1):
-                logger.info(f'pruning layer {len(layers) - 1}')
-            else:
-                logger.info(f'pruning layer {i} & {i+1}')
-        else:
-            logger.info(f'pruning layer {i}')
-
-        if args.use_cr:
-            # For CR, save the current dense layer
-            start_idx = max(0, i)
-            end_idx = min(i + 1, len(layers) - 1)
-            layer = layers[start_idx:end_idx + 1]
-            if not (i ==  (len(layers) - 1)):
-                dense_layer = type(layer[-1])(model.config).to(torch.float16).eval()
-                dense_layer.load_state_dict(layer[-1].state_dict())
-                dense_layers.append(dense_layer)
-                dense_layer = dense_layer.float()
-        else:
-            layer = layers[i:i+1]
-        layer = layer.float()
-
-        subset = find_layers(layer)
-        
-        wrapped_layers = {}
-
-        for name in subset:
-            subset[name].prune_rate = 0
-            if args.initial_method == 'magnitude':
-                wrapped_layers[name] = None
-            if args.initial_method == 'wanda':
-                from prunellm.min_recon_error.wanda import WandaGPT
-                wrapped_layers[name] = WandaGPT(subset[name], hf_device)
-            elif args.initial_method == 'sparsegpt':
-                from prunellm.min_recon_error.sparsegpt import SparseGPT
-                wrapped_layers[name] = SparseGPT(subset[name], hf_device)
-                
-        def add_batch(name):
-            def tmp(_, inp, out):
-                wrapped_layers[name].add_batch(inp[0].data, out.data)
-            return tmp
-        layer = layer.to(hf_device)
-        handles = []
-
-        if args.initial_method in ['wanda', 'sparsegpt']:
-            for name in wrapped_layers:
-                handles.append(subset[name].register_forward_hook(add_batch(name)))
-        with torch.no_grad():
-            for j in range(prune_nsamples):
-                outs[j] = obtain_output(layer, inps[j].unsqueeze(0).cuda(), attention_mask=attention_mask, position_ids=position_ids).to('cpu')
-        for h in handles:
-            h.remove()
-
-        # obtain outputs for x_dense
-        if args.use_cr:
-            with torch.no_grad():
-                for j in range(start_idx, end_idx + 1):
-                    dense_layers[j] = dense_layers[j].to(hf_device)
-                for j in range(0, prune_nsamples, args.infer_batch_size):
-                    dense_outs[j:j+args.infer_batch_size] = obtain_output(dense_layers[start_idx:end_idx + 1], dense_inps[j:j+args.infer_batch_size].to(hf_device), attention_mask=attention_mask, position_ids=position_ids).to('cpu')
-                for j in range(start_idx, end_idx + 1):
-                    dense_layers[j] = dense_layers[j].to('cpu')
-        else:
-            with torch.no_grad():
-                for j in range(prune_nsamples):
-                    dense_outs[j] = layer[0](dense_inps[j].unsqueeze(0).cuda(), attention_mask=attention_mask, position_ids=position_ids)[0].to('cpu')
-        
-
-
-        for name in subset:
-            print(i, name)
-            subset[name].mask = nn.Parameter(torch.zeros(subset[name].weight.shape, device=hf_device))
-            prune_fn(subset[name], wrapped_layers[name], args.sparsity_ratio, args.prune_n, args.prune_m)
-            subset[name].prune_rate = args.sparsity_ratio
-
-        # perform reconstruction
-        if args.use_gp:
-            train(layer, inps, dense_outs, dataloader, args, hf_device, attention_mask=attention_mask, position_ids=position_ids)
-        else:
-            train(layer, inps, outs, dataloader, args, hf_device, attention_mask=attention_mask, position_ids=position_ids)
-        
-        # calculate recon error
-        if not args.use_cr:
-            recon_error = val(layer, inps, dense_outs, args, hf_device, attention_mask, position_ids)
-            logger.info(f"recon error {recon_error}")
-
-        with torch.no_grad():
-            for name in subset:
-                mask_copy1 = subset[name].mask.clone()
-                subset[name].weight.data = mask_copy1 * subset[name].weight.data
-                subset[name].prune_rate = 0
-
-        torch.cuda.empty_cache()
-
-        # calculate outputs for x_sparse after pruning
-        with torch.no_grad():
-            with torch.amp.autocast("cuda"):
-                for j in range(0, prune_nsamples, args.infer_batch_size):
-                    outs[j:j+args.infer_batch_size] = layer[0](inps[j:j+args.infer_batch_size].to(hf_device), attention_mask=attention_mask, position_ids=position_ids, device=hf_device)[0].to("cpu")
-
-        if args.use_cr:
-            if i < 0:
-                dense_outs = dense_inps.clone()
-                outs = inps.clone()
-            else:
-                with torch.no_grad():
-                    with torch.amp.autocast("cuda"):
-                        dense_layers[i] = dense_layers[i].to(hf_device)
-                        for j in range(0, prune_nsamples, args.infer_batch_size):
-                            dense_outs[j:j+args.infer_batch_size] = obtain_output(dense_layers[i:i+1], dense_inps[j:j+args.infer_batch_size].to(hf_device), attention_mask=attention_mask, position_ids=position_ids).to('cpu')
-                        dense_layers[i] = dense_layers[i].to('cpu')
-
-                recon_error = val(layer[0:1], inps, dense_outs, args, hf_device, attention_mask, position_ids)
-
-                dense_layers[i] = None
-        
-                logger.info(f"recon error {recon_error}")
-                    
-        inps, outs = outs, inps
-        dense_inps, dense_outs = dense_outs, dense_inps
-        layer = layer.to('cpu')
-        torch.cuda.empty_cache()
-
-    model.config.use_cache = use_cache
-    torch.cuda.empty_cache()
-    
 
 def check_outlier_mean(mask,threshold):
     W = mask
@@ -3080,7 +2856,7 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     return W_mask, cur_sparsity
 
 
-def ww_sparsity(args, model, device=torch.device("cuda:0"), s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0):
+def ww_sparsity(args, model, metrics, device=torch.device("cuda:0"), s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0):
     if "opt" in args.model:
         blocks = model.model.decoder.layers    
     else:
@@ -3093,8 +2869,6 @@ def ww_sparsity(args, model, device=torch.device("cuda:0"), s1=0.8, s2=1.2, rati
             prunables.append(layer[name].weight.numel())
 
     layer_num_in_block = int(len(prunables) / len(blocks))
-
-    metrics = np.load(f"{args.ww_metric_cache}/{args.ww_metric}.npy")
     
     if args.mapping_type == 'block_wise':
         block_metrics = [np.mean(metrics[i:i+layer_num_in_block]) for i in range(0, len(metrics), layer_num_in_block)]
@@ -3118,7 +2892,7 @@ def ww_sparsity(args, model, device=torch.device("cuda:0"), s1=0.8, s2=1.2, rati
     return layerwise_pruning_ratios
 
 
-def check_sparsity(args, model):
+def check_sparsity(args, model, logger):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
     layers = model.model.layers
@@ -3138,7 +2912,7 @@ def check_sparsity(args, model):
             sub_count += (W==0).sum().item()
             sub_params += W.numel()
 
-        print(f"layer {i} sparsity {float(sub_count)/sub_params:.6f}")
+        logger.info(f"layer {i} sparsity {float(sub_count)/sub_params:.6f}")
 
     model.config.use_cache = use_cache 
     return float(count)/total_params 
@@ -3148,8 +2922,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--prune_method", type=str, choices=["magnitude", "sparsegpt", "wanda", "sparsellm", "DSnoT", "owl", "gradient", 
-        "gblm-pruner", "pruner-zero", "flap", "admm", "RIA", "alphapruning", "ALPS", "EBFT", "min_recon_error"]
+        "--prune_method", type=str, help="Pruning methods"
     )
     parser.add_argument(
         "--model", type=str, help="LlaMA model to load"
@@ -3176,6 +2949,10 @@ if __name__ == "__main__":
         "--sparsity_type", type=str, choices=["unstructured", "4:8", "2:4"]
     )
     parser.add_argument(
+        '--groupsize', type=int, default=-1,
+        help='Groupsize to use for prune; default uses full row.'
+    )
+    parser.add_argument(
         "--blocksize", type=int, default=128, help="Blocksize to use for adaptive mask selection.",
     )
     parser.add_argument(
@@ -3197,7 +2974,7 @@ if __name__ == "__main__":
         "--invert", action="store_true", help="Invert subset."
     )
     parser.add_argument(
-        "--save_model", type=str, default="", help="Path to saved model."
+        "--save", action="store_true", help="Path to saved model."
     )
     parser.add_argument(
         "--true_sequential", action="store_true", help="Whether to run in true sequential model.",
@@ -3206,7 +2983,13 @@ if __name__ == "__main__":
         '--use_variant', action="store_true", help="whether to use the wanda variant described in the appendix"
     )
     parser.add_argument(
+        "--eval_ppl", action="store_true"
+    )
+    parser.add_argument(
         "--eval_zero_shot", action="store_true"
+    )
+    parser.add_argument(
+        "--lm_eval_batch_size", type=int, default=16
     )
 
     # For DSnoT
@@ -3248,7 +3031,7 @@ if __name__ == "__main__":
 
     # For AlphaPruning
     parser.add_argument("--ww_metric", default="alpha_peak", type=str, help="the WW-based metric to ues.")
-    parser.add_argument("--ww_metric_cache", default="./cache/")
+    parser.add_argument("--ww_metric_cache", default="./cache")
     parser.add_argument("--epsilon", default=0.3, type=float, help="for pruning ratio allocation.")
     parser.add_argument("--mapping_type", default="block_wise", type=str, help="mapping type for pruning ratios allocation.")
     
@@ -3271,7 +3054,6 @@ if __name__ == "__main__":
     parser.add_argument('--use_gp', action='store_true', help='Whether to use GP.')
     parser.add_argument('--use_cr', action='store_true', help='Whether to use CR.')
 
-
     args = parser.parse_args()
 
     if args.initial_method != None:
@@ -3288,15 +3070,16 @@ if __name__ == "__main__":
     torch.random.manual_seed(args.seed)
 
     args.prune_n, args.prune_m = 0, 0
+    sparse_rate = str(args.sparsity_ratio).split('.')[-1]
     if args.sparsity_type != "unstructured" and args.sparsity_ratio != 0:
         assert args.sparsity_ratio == 0.5, "sparsity ratio must be 0.5 for structured N:M sparsity"
         args.prune_n, args.prune_m = map(int, args.sparsity_type.split(":"))
-        args.save_model = f"{args.save_model}/{args.prune_n}_{args.prune_m}"
+        args.save_model = f"save_models/{args.prune_method}/{args.prune_n}_{args.prune_m}"
     else:
         if args.initial_method != None:
-            args.save_model = f"{args.save_model}/{args.initial_method}/{args.sparsity_type}"
+            args.save_model = f"save_models/{args.prune_method}/{args.initial_method}/{args.sparsity_type}/{sparse_rate}"
         else:
-            args.save_model = f"{args.save_model}/{args.sparsity_type}"
+            args.save_model = f"save_models/{args.prune_method}/{args.sparsity_type}/{sparse_rate}"
 
 
     logger.info(f"loading llm model: {args.model}")
@@ -3307,6 +3090,33 @@ if __name__ == "__main__":
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
+    if args.prune_method == "none":
+        from eval import llama_eval
+
+        logger.info("Check sparisity ratio ...")
+        sparsity_ratio = check_sparsity(args, model, logger)
+        
+        if args.eval_ppl:
+            logger.info("PPL Evaluation") 
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger)
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+            
+        if args.save:
+            model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
+
     if args.prune_method == "magnitude":
         from eval import llama_eval
 
@@ -3315,16 +3125,25 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
+        logger.info("PPL Evaluation") 
         for dataset in ["wikitext2", "ptb", "c4"]:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
             )
-            print("Dataset:", dataset)
-            llama_eval(model, testloader, DEV, dataset, logger)
+            logger.info(f"Dataset: {dataset}")
+            llama_eval(args, model, testloader, DEV, dataset, logger)
 
-        if args.save_model:
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+
+        if args.save:
             model.save_pretrained(args.save_model)
 
     elif args.prune_method == "sparsegpt":
@@ -3338,18 +3157,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
         
-        logger.info("PPL Evaluation") 
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            logger.info(f"Dataset: {dataset}")
-            llama_eval(args, model, testloader, DEV, dataset, logger)
+        if args.eval_ppl:
+            logger.info("PPL Evaluation") 
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger)
 
-        if args.save_model:
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+
+        if args.save:
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "wanda":
         from prunellm.wanda import WandaGPT
@@ -3360,29 +3189,29 @@ if __name__ == "__main__":
         llama_sequential_wanda(args, model, dataloader, DEV, logger)
         logger.info(f"Total time: {time.time() - tick}")
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
-        
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
-        
-        # if args.eval_zero_shot:
-        #     from eval import eval_zero_shot
-        #     from transformers import AutoTokenizer
-            
-        #     task_list = ["boolq", "rte", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
-        #     num_shot = 0
-        #     results = eval_zero_shot(args.model, model, logger, task_list, num_shot)
-        #     logger.info("zero_shot evaluation")
-        #     logger.info(results)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        if args.save_model:    
+        if args.eval_ppl:
+            logger.info("PPL Evaluation") 
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+        
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "sparsellm":
         from prunellm.sparsellm import SparseLLM
@@ -3394,18 +3223,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "DSnoT":
         from prunellm.DSnoT import DSnoTGPT, return_reorder_indice
@@ -3417,18 +3256,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            logger.info("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
         
-        if args.save_model:    
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+        
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "owl":
         from prunellm.owl import WrappedGPT
@@ -3436,8 +3285,6 @@ if __name__ == "__main__":
 
         logger.info("Pruning Owl ...") 
         tick = time.time()
-        if args.prune_method == "owl" and args.sparsity_type == "unstructured" and args.initial_method == 'magnitude':
-            llama_sequential_owl_magnitude(args, model, dataloader, DEV, logger)
         if args.prune_method == "owl" and args.sparsity_type == "unstructured" and args.initial_method == 'sparsegpt':
             from prunellm.sparsegpt import SparseGPT
             llama_sequential_owl_sparsegpt(args, model, dataloader, DEV, logger)
@@ -3448,18 +3295,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "gradient":
         from eval import llama_eval
@@ -3470,18 +3327,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "gblm-pruner":
         from prunellm.gblm_pruner import GBLMPrunerGPT
@@ -3493,18 +3360,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "pruner-zero":
         from prunellm.pruner_zero import PrunerZeroGPT
@@ -3518,18 +3395,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:
+        if args.save:
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "flap":
         from prunellm.flap import FLAPGPT, cal_remove_neuron, compress, metrics
@@ -3541,17 +3428,18 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
 
     elif args.prune_method == "admm":
@@ -3564,21 +3452,32 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "RIA":
-        from prunellm.RIA import RIAGPT
+        from prunellm.RIA import RIAGPT, lexsort, maximize_total_value
+        from torch.sparse import to_sparse_semi_structured
         from eval import llama_eval
 
         logger.info("Pruning RIA ...") 
@@ -3587,18 +3486,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
         
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "alphapruning":
         from prunellm.esd_utils import get_esd_metrics
@@ -3608,15 +3517,29 @@ if __name__ == "__main__":
         tick = time.time()
 
         if args.ww_metric_cache:
+            # 创建目录
             args.ww_metric_cache = f"{args.ww_metric_cache}/{args.model.split('/')[-1]}"
             Path(args.ww_metric_cache).mkdir(parents=True, exist_ok=True)
             print("cache path: ", args.ww_metric_cache)
-        # metric_values = get_esd_metrics(args, model, args.ww_metric)
-        # np.save(f"{args.ww_metric_cache}/{args.ww_metric}.npy", metric_values)
+            
+            # 定义文件路径
+            file_path = f"{args.ww_metric_cache}/{args.ww_metric}.npy"
+            
+            # 检查文件是否存在
+            if os.path.exists(file_path):
+                # 如果存在，加载文件
+                metrics = np.load(file_path)
+                print(f"Loaded metrics from {file_path}")
+            else:
+                # 如果不存在，通过函数创建并保存
+                print(f"{file_path} does not exist, creating and saving...")
+                metrics = get_esd_metrics(args, model, args.ww_metric)
+                np.save(file_path, metrics)
+                print(f"Metrics saved to {file_path}")
 
         s1 = 1.0 - args.epsilon
         s2 = 1.0 + args.epsilon
-        ratios = ww_sparsity(args, model, DEV, s1, s2)
+        ratios = ww_sparsity(args, model, metrics, DEV, s1, s2)
 
         if args.initial_method == "wanda":
             from prunellm.wanda import WandaGPT
@@ -3631,18 +3554,28 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
+
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
         
-        if args.save_model:    
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "ALPS":
         from prunellm.ALPS import ALPSGPT
@@ -3654,69 +3587,31 @@ if __name__ == "__main__":
         logger.info(f"Total time: {time.time() - tick}")
 
         logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
+        sparsity_ratio = check_sparsity(args, model, logger)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
+        if args.eval_ppl:
+            logger.info("PPL Evaluation")    
+            for dataset in ["wikitext2", "ptb", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, logger) 
         
-        if args.save_model:    
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+
+        if args.save:    
             model.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
-    elif args.prune_method == "EBFT":
-        from eval import llama_eval
 
-        logger.info("Pruning EBFT ...") 
-        tick = time.time()
-        if args.initial_method == "magnitude":
-            from prunellm.EBFT.prune_fn import llama_sequential_EBFT_magnitude
-            llama_sequential_EBFT_magnitude(args. model, dataloader, DEV, logger)
-        if args.initial_method == 'sparsegpt':
-            from prunellm.EBFT.prune_fn import llama_sequential_EBFT_sparsegpt
-            llama_sequential_EBFT_sparsegpt(args, model, dataloader, DEV, logger)
-        elif args.initial_method == 'wanda':
-            from prunellm.EBFT.prune_fn import llama_sequential_EBFT_wanda
-            llama_sequential_EBFT_wanda(args, model, dataloader, DEV, logger)
-        logger.info(f"Total time: {time.time() - tick}")
 
-        logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
 
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
         
-        if args.save_model:    
-            model.save_pretrained(args.save_model)
 
-    elif args.prune_method == "min_recon_error":
-        from prunellm.min_recon_error.prune_fn import obtain_output, find_layers
-        from prunellm.min_recon_error.finetune import train, val
-        from eval import llama_eval
-
-        logger.info("Pruning Minimize Reconstruction Error ...")
-        tick = time.time()
-        llama_sequential_min_recon_error(args, model, dataloader, DEV, logger)
-        logger.info(f"Total time: {time.time() - tick}")
-
-        logger.info("Check sparisity ratio ...")
-        sparsity_ratio = check_sparsity(args, model)
-
-        logger.info("PPL Evaluation")    
-        for dataset in ["wikitext2", "ptb", "c4"]:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-            )
-            print("Dataset:", dataset)
-            llama_eval(args, model, testloader, DEV, dataset, logger) 
-        
-        if args.save_model:    
-            model.save_pretrained(args.save_model)

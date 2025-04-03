@@ -2,6 +2,7 @@
 import time
 import torch
 import torch.nn as nn
+from transformers import AutoTokenizer
 
 from collections import defaultdict
 from utils.modelutils import *
@@ -61,7 +62,7 @@ def llama_eval(args, model, testenc, dev,  dataset: str, logger):
 
     for i in range(len(layers)):
         logger.info(f'================={i}==================')
-        hf_device = f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
         layer = layers[i].to(hf_device)
         inps = inps.to(hf_device)
         position_ids = position_ids.to(hf_device)
@@ -82,7 +83,7 @@ def llama_eval(args, model, testenc, dev,  dataset: str, logger):
         torch.cuda.empty_cache()
         inps, outs = outs, inps
 
-    hf_device = f"cuda:{hf_device_map[f'model.layers.{len(layers)-1}']}"
+    hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
     if model.model.norm is not None:
         model.model.norm = model.model.norm.to(hf_device)
     model.lm_head = model.lm_head.to(hf_device)
@@ -108,24 +109,67 @@ def llama_eval(args, model, testenc, dev,  dataset: str, logger):
     model.config.use_cache = use_cache
 
 
+def process_eval_results(results, logger):
+    metric_vals = {}
+    for task, result in results['results'].items():
+        # 定义指标键的优先级
+        priority_keys = [
+            'acc_norm,none', 'acc_norm',
+            'acc,none', 'acc',
+            'accuracy'  # 某些任务可能使用全称
+        ]
+        
+        # 查找有效指标
+        value = 0.0
+        for key in priority_keys:
+            if key in result:
+                value = result[key]
+                break
+        
+        # 无有效指标的备选方案
+        if value == 0.0:
+            acc_keys = [k for k in result if k.startswith('acc')]
+            if acc_keys:
+                value = result[acc_keys[0]]
+                logger.warning(
+                    f"Task {task} 使用备用指标 `{acc_keys[0]}`. "
+                    f"全部可用键: {list(result.keys())}"
+                )
+            else:
+                logger.error(f"Task {task} 无可用精度指标!")
+        
+        metric_vals[task] = round(value, 4)
+    
+    # 计算平均（排除完全失败的任务）
+    valid_scores = [v for v in metric_vals.values() if v > 0]
+    avg_score = round(sum(valid_scores) / len(valid_scores), 4) if valid_scores else 0.0
+    metric_vals['acc_avg'] = avg_score
+    
+    return metric_vals
 
-def eval_zero_shot(model_name, model, logger, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
+def eval_zero_shot(args, model, logger, task_list=["boolq","rte","hellaswag","winogrande","arc_challenge","arc_easy","openbookqa"], 
         num_fewshot=0,  add_special_tokens=False): 
     import lm_eval
     from lm_eval import utils as lm_eval_utils
-    from lm_eval.api.registry import ALL_TASKS
     from lm_eval.models.huggingface import HFLM
 
     model.to(DEV)
     
-    tokenizer = transformers.AutoTokenizer.from_pretrained(model, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
     hflm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.lm_eval_batch_size)
-
-    task_names = lm_eval_utils.pattern_match(task_list, ALL_TASKS)
-    results = lm_eval.simple_evaluate(hflm, tasks=task_names, batch_size=args.lm_eval_batch_size)['results']
-
-    metric_vals = {task: round(result.get('acc_norm,none', result['acc,none']), 4) for task, result in results.items()}
-    metric_vals['acc_avg'] = round(sum(metric_vals.values()) / len(metric_vals.values()), 4)
-    logger.info(metric_vals)
     
-    return results
+    ALL_TASKS = ["piqa", "copa", "boolq", "rte", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+    task_names = lm_eval_utils.pattern_match(task_list, ALL_TASKS)
+    print(f"Matched Tasks: {task_names}")
+    if not task_names:
+        raise ValueError("No tasks matched. Check task names!")
+
+    results = lm_eval.simple_evaluate(
+        model=hflm, 
+        tasks=task_names, 
+        num_fewshot=num_fewshot,
+        batch_size=args.lm_eval_batch_size
+    )
+
+    metric_vals = process_eval_results(results, logger)
+    logger.info(f"Evaluation Results: {metric_vals}")

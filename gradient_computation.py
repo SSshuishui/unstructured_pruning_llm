@@ -47,8 +47,8 @@ class TokenizerWrapper:
 def get_wikitext2(nsamples, seed, seqlen, tokenizer):
     # Load train and test datasets
     # Load local dataset
-    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train', cache_dir="/data/huggingface_cache/datasets")
-    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test', cache_dir="/data/huggingface_cache/datasets")
+    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
 
     # Encode datasets
     trainenc = tokenizer(' '.join(traindata['text']), return_tensors='pt')
@@ -203,7 +203,7 @@ if __name__ == '__main__':
     model_args = args.model
     cache_dir_args = 'llm_weights'
     model = get_llm(model_args, cache_dir_args)
-    if args.llama_version == 2:
+    if args.llama_version == 2 or args.llama_version == 3:
         tokenizer = AutoTokenizer.from_pretrained(model_args, use_fast=False)
     else:
         tokenizer = LlamaTokenizer.from_pretrained(model_args, use_fast=False)

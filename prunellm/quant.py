@@ -19,7 +19,7 @@ class Quantizer(nn.Module):
             self,
             bits, perchannel=False, sym=True, 
             mse=False, norm=2.4, grid=100, maxshrink=.8,
-            grouprows=1
+            grouprows=1, beta=1.0
         ):
         self.maxq = torch.tensor(2 ** bits - 1)
         self.perchannel = perchannel
@@ -27,6 +27,7 @@ class Quantizer(nn.Module):
         self.mse = mse
         self.norm = norm
         self.grid = grid
+        self.beta = beta
         self.maxshrink = maxshrink 
         self.grouprows = grouprows
 
@@ -64,7 +65,7 @@ class Quantizer(nn.Module):
         xmin[tmp] = -1
         xmax[tmp] = +1
 
-        self.scale = (xmax - xmin) / self.maxq
+        self.scale = self.beta *  (xmax - xmin) / self.maxq
         if self.sym:
             self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
         else:
