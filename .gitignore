@@ -157,6 +157,7 @@ log/
 save_models/
 gradients/
 cache/
+results_efficiency/
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

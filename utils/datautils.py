@@ -10,12 +10,11 @@ def set_seed(seed):
     torch.random.manual_seed(seed)
 
 
-def get_wikitext2(nsamples, seed, seqlen, model):
+def get_wikitext2(nsamples, seed, seqlen, tokenizer):
     
     traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
     testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
 
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
     trainenc = tokenizer(" ".join(traindata['text']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
 
@@ -30,11 +29,10 @@ def get_wikitext2(nsamples, seed, seqlen, model):
         trainloader.append((inp, tar))
     return trainloader, testenc
 
-def get_ptb(nsamples, seed, seqlen, model):
+def get_ptb(nsamples, seed, seqlen, tokenizer):
     traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train', trust_remote_code=True)
     testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test', trust_remote_code=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
     trainenc = tokenizer(" ".join(traindata['sentence']), return_tensors='pt')
     testenc = tokenizer(" ".join(testdata['sentence']), return_tensors='pt')
 
@@ -49,15 +47,13 @@ def get_ptb(nsamples, seed, seqlen, model):
         trainloader.append((inp, tar))
     return trainloader, testenc
 
-def get_c4(nsamples, seed, seqlen, model):
+def get_c4(nsamples, seed, seqlen, tokenizer):
     traindata = load_dataset(
         'bhxiang/c4_calibrate_mini', split='train'
     )
     valdata = load_dataset(
         'bhxiang/c4_calibrate_mini', split='validation'
     )
-
-    tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
 
     random.seed(seed)
     trainloader = []
@@ -84,10 +80,10 @@ def get_c4(nsamples, seed, seqlen, model):
 
     return trainloader, valenc
 
-def get_loaders(name, nsamples=128, seed=0, seqlen=2048, model=''):
+def get_loaders(name, tokenizer, nsamples=128, seed=0, seqlen=2048):
     if 'wikitext2' in name:
-        return get_wikitext2(nsamples, seed, seqlen, model)
+        return get_wikitext2(nsamples, seed, seqlen, tokenizer)
     if 'ptb' in name:
-        return get_ptb(nsamples, seed, seqlen, model)
+        return get_ptb(nsamples, seed, seqlen, tokenizer)
     if 'c4' in name:
-        return get_c4(nsamples, seed, seqlen, model)
+        return get_c4(nsamples, seed, seqlen, tokenizer)

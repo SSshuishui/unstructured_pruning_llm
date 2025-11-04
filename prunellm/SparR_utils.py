@@ -195,3 +195,114 @@ def W_proximal_preprocess_groupwise(W, X, device, alpha=0.0001, n_iter=200, grou
     return W_hat.T
 
 
+
+
+# -------------------l1 per-layer---------------------------  
+def l1_proximal(x, scale):
+    """
+    The proximal operator of the l1 norm, which is the soft-thresholding function.
+
+    Prox_{scale * |.|_1}(x) = sign(x) * max(|x| - scale, 0)
+
+    Parameters
+    ----------
+    x: torch.Tensor
+      Tensor to apply the operator on.
+    scale: float
+      The thresholding parameter (lambda).
+
+    Returns
+    -------
+    torch.Tensor
+      The result of soft-thresholding.
+    """
+    return torch.sign(x) * torch.clamp(torch.abs(x) - scale, min=0)
+
+
+def W_sparsifying_preprocess(
+    W, X, device, 
+    sparsity_strength=0.1,  # 新的、更直观的超参数，代替alpha
+    n_iter=200, 
+    eta=0.5                 # 使用一个更保守的eta
+):
+    """
+    Sparsity-inducing preprocessing with DYNAMIC alpha setting.
+    """
+    
+    W_hat_orig = W.clone().T
+    W_optim = W.clone().T
+
+    # --- 动态计算 alpha ---
+    with torch.no_grad():
+        w_abs_mean = torch.mean(torch.abs(W))
+        alpha = sparsity_strength * w_abs_mean
+        print(f"--- SparR Info ---")
+        print(f"W abs mean: {w_abs_mean.item():.6f}")
+        print(f"Sparsity strength: {sparsity_strength}")
+        print(f"Calculated alpha: {alpha.item():.6f}")
+        print(f"Effective threshold (eta * alpha): {(eta * alpha).item():.6f}")
+        print(f"--------------------")
+
+    try:
+        U, s, Vt = torch.linalg.svd(X, full_matrices=False)
+        s_max = torch.max(s)
+        if s_max == 0: # 处理奇异值全为0的极端情况
+             s_max = 1.0
+        s /= s_max
+        X_norm = torch.mm(U, torch.mm(torch.diag(s), Vt))
+        XtX = torch.matmul(X_norm.T, X_norm).to(device)
+    except torch.linalg.LinAlgError:
+        print("SVD failed, using original X.")
+        XtX = torch.matmul(X.T, X).to(device)
+
+    for i in range(n_iter):
+        grad = torch.matmul(XtX, W_optim - W_hat_orig)
+        W_temp = W_optim - eta * grad
+
+        W_optim = l1_proximal(W_temp, eta * alpha)
+    del XtX
+    return W_optim.T
+
+
+
+# -------------------l1 per-group---------------------------
+
+def W_sparsifying_preprocess_groupwise(W, X, device, alpha=0.0001, n_iter=200, group_size=128):
+    """
+    Groupwise Sparsity-inducing preprocessing for pruning.
+    """
+    W_hat_orig = W.clone().T
+    W_optim = W.clone().T
+
+    # SVD预处理 (同上)
+    m, n = X.shape
+    try:
+        U, s, Vt = torch.linalg.svd(X, full_matrices=False)
+        s /= torch.max(s)
+        X_norm = torch.mm(U, torch.mm(torch.diag(s), Vt))
+        XtX = torch.matmul(X_norm.T, X_norm).to(device)
+    except torch.linalg.LinAlgError:
+        print("SVD failed, using original X for Hessian.")
+        XtX = torch.matmul(X.T, X).to(device)
+
+    eta = 1.0
+
+    in_features, out_features = W_optim.shape
+    
+    # 调整形状以进行分组操作
+    if in_features % group_size != 0:
+        raise ValueError("The number of features must be divisible by the group size.")
+    num_groups = in_features // group_size
+    
+    for _ in range(n_iter):
+        grad = torch.matmul(XtX, W_optim - W_hat_orig)
+        W_temp = W_optim - eta * grad
+        
+        # 将梯度下降后的结果分组，然后应用近端算子
+        W_temp_grouped = W_temp.view(num_groups, group_size, out_features)
+        W_optim_grouped = l1_proximal(W_temp_grouped, eta * alpha)
+        
+        # 恢复形状以进行下一次梯度计算
+        W_optim = W_optim_grouped.view(in_features, out_features)
+        
+    return W_optim.T

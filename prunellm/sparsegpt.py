@@ -6,7 +6,7 @@ import torch.nn as nn
 import transformers
 
 from .quant import *
-
+from .SparR_utils import *
 
 DEBUG = False 
 
@@ -27,6 +27,7 @@ class SparseGPT:
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
+        self.XtX = torch.zeros((self.columns, self.columns), device=self.dev)
         self.nsamples = 0
 
     def add_batch(self, inp, out, blocksize=1024):
@@ -41,13 +42,17 @@ class SparseGPT:
             if len(inp.shape) == 3:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
+
+        self.X = inp.t().float()
+        self.XtX += inp.float().matmul(inp.float().t()) 
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
+        
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         self.H += inp.matmul(inp.t())
 
     def fasterprune(
-        self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01
+        self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01, magr=False, groupsize=-1
     ):
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
@@ -55,6 +60,15 @@ class SparseGPT:
         if isinstance(self.layer, transformers.Conv1D):
             W = W.t()
         W = W.float()
+
+        if magr:
+            print("Applying MagR preprocessing for pruning...")
+            if groupsize != -1:
+                print('per group!')
+                W = W_sparsifying_preprocess_groupwise(W, self.X, self.dev, group_size=groupsize)
+            else:
+                print('per layer!')
+                W = W_sparsifying_preprocess(W, self.X, self.dev)
 
         if hasattr(self, 'quantizer'):
             if not self.quantizer.ready():

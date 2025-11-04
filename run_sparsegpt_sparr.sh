@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# 定义是否使用 CUDA 和剪枝方法
-USE_CUDA=0,1,2  # 使用 GPU 0
-PRUNE_METHOD="wanda"
+USE_CUDA=0,1 # 使用 GPU 0
+PRUNE_METHOD="sparsegpt"
 
 # 指定模型路径和其他固定参数
 MODEL_PATH="/data/BaseLLMs/llama3-8b"
@@ -14,14 +13,16 @@ for sparsity_type in "unstructured" "2:4" "4:8"; do
         "unstructured")
             # 当 sparsity_type 是 unstructured 时，遍历 sparsity_ratio
             for sparsity_ratio in 0.5; do
+            # for sparsity_ratio in 0.2 0.3 0.4 0.5 0.6 0.7 0.8; do
                 CUDA_VISIBLE_DEVICES=$USE_CUDA python llama.py \
                     --model $MODEL_PATH \
                     --prune_method $PRUNE_METHOD \
                     --dataset $DATASET \
                     --sparsity_ratio $sparsity_ratio \
                     --sparsity_type $sparsity_type \
-                    --eval_ppl \
-                    --eval_zero_shot
+                    --magr \
+                    --eval_ppl 
+                    # --eval_zero_shot
             done
             ;;
         # "2:4"|"4:8")

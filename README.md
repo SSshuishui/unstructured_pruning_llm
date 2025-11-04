@@ -4,28 +4,25 @@ LLM Un-Structured Pruning Methods
 
 Include:
 
-| Methods                                          | Quantize | PPL Eval | Task Eval | Save |
+| Methods                                          | Prune | PPL Eval | Task Eval | Save |
 | :----------------------------------------------- | :------: | :------: | :-------: | :--: |
-| Magnitude                                        |   yes   |   yes   |   TODO   | yes |
-| [SparseGPT](https://arxiv.org/pdf/2301.00774)       |   yes   |   yes   |   TODO   | yes |
-| [Wanda](https://arxiv.org/pdf/2306.11695)           |   yes   |   yes   |   TODO   | yes |
-| [SparseLLM](https://arxiv.org/pdf/2402.17946)       |   yes   |   yes   |   TODO   | yes |
-| [DSnoT](https://arxiv.org/pdf/2310.08915)           |   yes   |   yes   |   TODO   | yes |
-| [OWL](https://arxiv.org/pdf/2310.05175)             |   yes   |   yes   |   TODO   | yes |
-| [GBLM-Pruner](https://arxiv.org/pdf/2311.04902)     |   yes   |   yes   |   TODO   | yes |
-| [Pruner-Zero](https://arxiv.org/pdf/2406.02924v1)   |   yes   |   yes   |   TODO   | yes |
-| [FLAP](https://arxiv.org/pdf/2312.11983)            |   yes   |   yes   |   TODO   | yes |
-| [admm](https://arxiv.org/pdf/2401.02938)            |   yes   |   yes   |   TODO   | yes |
-| [RIA](https://openreview.net/forum?id=Tr0lPx9woF)   |   yes   |   yes   |   TODO   | yes |
-| [AlphaPruninig](https://arxiv.org/pdf/2410.10912)   |   yes   |   yes   |   TODO   | yes |
-| [ALPS](https://arxiv.org/pdf/2406.07831)            |   yes   |   yes   |   TODO   | yes |
-| [EBFT](https://arxiv.org/pdf/2402.12419)            |   yes   |   yes   |   TODO   | yes |
-| [Min_Recon_Error](https://arxiv.org/pdf/2406.15524) |   yes   |   yes   |   TODO   | yes |
+| Magnitude                                        |   yes   |   yes   |   yes   | yes |
+| [SparseGPT](https://arxiv.org/pdf/2301.00774)       |   yes   |   yes   |   yes   | yes |
+| [Wanda](https://arxiv.org/pdf/2306.11695)           |   yes   |   yes   |   yes   | yes |
+| [DSnoT](https://arxiv.org/pdf/2310.08915)           |   yes   |   yes   |   yes   | yes |
+| [OWL](https://arxiv.org/pdf/2310.05175)             |   yes   |   yes   |   yes   | yes |
+| [GBLM-Pruner](https://arxiv.org/pdf/2311.04902)     |   yes   |   yes   |   yes   | yes |
+| [Pruner-Zero](https://arxiv.org/pdf/2406.02924v1)   |   yes   |   yes   |   yes   | yes |
+| [FLAP](https://arxiv.org/pdf/2312.11983)            |   yes   |   yes   |   yes   | yes |
+| [admm](https://arxiv.org/pdf/2401.02938)            |   yes   |   yes   |   yes   | yes |
+| [RIA](https://openreview.net/forum?id=Tr0lPx9woF)   |   yes   |   yes   |   yes   | yes |
+| [AlphaPruninig](https://arxiv.org/pdf/2410.10912)   |   yes   |   yes   |   yes   | yes |
+| [ALPS](https://arxiv.org/pdf/2406.07831)            |   yes   |   yes   |   yes   | yes |
+| [DLP](https://arxiv.org/pdf/2505.23807)             |   yes   |   yes   |   yes   | yes |
 
 add `--eval_zero_shot` to evaluate
 
 ```
-git clone --depth 1 https://github.com/EleutherAI/lm-evaluation-harness
 cd lm-evaluation-harness
 pip install -e .
 ```
@@ -118,36 +115,6 @@ python llama.py \
 --dataset c4 \
 --sparsity_ratio 0.5 \
 --sparsity_type unstructured \
---save 
-```
-
-## SparseLLM
-
-* Due to 4090 only have 24G, need to minimize nsamples for running.
-
-#### For unstructured sparsity
-
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method sparsellm \
---dataset c4 \
---sparsity_ratio 0.7 \
---sparsity_type unstructured \
---nsamples 16 \
---save
-```
-
-#### For structured N:M sparsity, "2:4" or "4:8"
-
-```
-python llama.py \
---model /PATH/TO/LLAMA2/ \
---prune_method sparsellm \
---dataset c4 \
---sparsity_ratio 0.5 \
---sparsity_type 2:4 \
---nsamples 16 \
 --save 
 ```
 
@@ -499,15 +466,73 @@ python llama.py \
 --save 
 ```
 
-
-## MixGPT
+## DLP
+#### For DLP-SparseGPT
 
 ```
 python llama.py \
 --model /PATH/TO/LLAMA2/ \
---prune_method MixGPT \
+--prune_method DLP \
 --dataset c4 \
---sparsity_ratio 0.6 \
+--initial_method sparsegpt \
+--dlp_alpha 0.15 \
+--sparsity_ratio 0.7 \
 --sparsity_type unstructured \
---save
+--save 
 ```
+
+#### For OWL-Wanda
+```
+python llama.py \
+--model /PATH/TO/LLAMA2/ \
+--prune_method DLP \
+--dataset c4 \
+--initial_method wanda \
+--dlp_alpha 0.15 \
+--sparsity_ratio 0.7 \
+--sparsity_type unstructured \
+--save 
+```
+
+
+
+## Inference Speed Evaluation
+### LLaMA2 Model
+ - 1. save pruned model(`SOURCE_PATH`) to `SAVE_PATH`, copy the tokenizer file(`tokenizer_config.json`, `tokenizer.json`, `special_tokens_map.json`) to `SOURCE_PATH`
+ - 2. install [sparseml](https://github.com/neuralmagic/sparseml) and [deepsparse](https://github.com/neuralmagic/deepsparse) 
+ - 3. export pruned model to ONNX format
+
+ ```
+ sparseml.export 
+ --target_path SAVE_PATH  \
+ --integration transformers \
+ --task text-generation  \
+ SOURCE_PATH
+ ```
+ - 4.deepsparse inference evaluation
+ ```
+ deepsparse.benchmark
+ SAVE_PATH/deployment/model.onnx \
+ --sequence_length 2048 \
+ ```
+
+### LLaMA3 Model
+ - 1. save pruned model(`SOURCE_PATH`) to `SAVE_PATH`, copy the tokenizer file(`tokenizer_config.json`, `tokenizer.json`, `special_tokens_map.json`) to `SOURCE_PATH`
+ - 2. install [vllm](https://github.com/vllm-project/vllm)
+ - 3. run benchmark script
+ ```
+ vllm serve <your_model> --disable-log-requests
+
+ python3 vllm_benchmarks/benchmark_serving.py --backend vllm --model <your_model> --dataset-name <dataset_name> --dataset-path <dataset_path> --num-prompts <number_of_prompts>
+
+ ```
+
+ ```
+ python3 vllm_benchmarks/benchmark_throughput.py --model <your_model> --dataset-name <dataset_name> --dataset-path <dataset_path> --num-prompts <number_of_prompts>
+
+ ```
+
+
+ vllm serve save_models/wanda/unstructured/5 --disable-log-requests
+
+ python vllm_benchmarks/benchmark_serving.py --model save_models/wanda/unstructured/5 --dataset-name sharegpt --dataset-path /data/zhaox/data/ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 10
