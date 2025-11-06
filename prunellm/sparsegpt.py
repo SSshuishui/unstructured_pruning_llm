@@ -6,7 +6,7 @@ import torch.nn as nn
 import transformers
 
 from .quant import *
-from .SparR_utils import *
+from .MAR_utils import *
 
 DEBUG = False 
 
@@ -52,7 +52,7 @@ class SparseGPT:
         self.H += inp.matmul(inp.t())
 
     def fasterprune(
-        self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01, magr=False, groupsize=-1
+        self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01, mar=False, groupsize=-1
     ):
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
@@ -61,14 +61,13 @@ class SparseGPT:
             W = W.t()
         W = W.float()
 
-        if magr:
-            print("Applying MagR preprocessing for pruning...")
+        if mar:
             if groupsize != -1:
-                print('per group!')
-                W = W_sparsifying_preprocess_groupwise(W, self.X, self.dev, group_size=groupsize)
+                print("per layer!")
+                W = W_gradient_preprocess_pruning(W, self.X, self.dev)
             else:
-                print('per layer!')
-                W = W_sparsifying_preprocess(W, self.X, self.dev)
+                print("per group!")
+                W = W_gradient_preprocess_pruning_per_group(W, self.X, self.dev, groupsize=groupsize)
 
         if hasattr(self, 'quantizer'):
             if not self.quantizer.ready():

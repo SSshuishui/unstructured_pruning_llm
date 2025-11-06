@@ -182,7 +182,7 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger, ratios=None
                     prunen=args.prune_n,
                     prunem=args.prune_m,
                     percdamp=args.percdamp,
-                    magr=args.magr,
+                    mar=args.mar,
                     groupsize=args.groupsize,
                 )
                 gpts[name].free()
@@ -3006,7 +3006,7 @@ if __name__ == "__main__":
         "--model", type=str, help="LlaMA model to load"
     )
     parser.add_argument(
-        "--dataset", type=str, choices=["wikitext2", "ptb", "c4"], help="Where to extract calibration data from.",
+        "--dataset", type=str, choices=["wikitext2", "c4", "ptb"], help="Where to extract calibration data from.",
     )
     parser.add_argument(
         "--seed", type=int, default=0, help="Seed for sampling the calibration data."
@@ -3134,8 +3134,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--dlp_alpha', type=float, default=0.15, help='the alpha for DLP method.')
 
-    # Add MagR
-    parser.add_argument('--magr', action="store_true", help="use MagR or not")
+    # Add MaR
+    parser.add_argument('--mar', action="store_true", help="use MAR or not")
 
     args = parser.parse_args()
 
@@ -3185,12 +3185,12 @@ if __name__ == "__main__":
         
         if args.eval_ppl:
             logger.info("PPL Evaluation") 
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger)
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3216,12 +3216,12 @@ if __name__ == "__main__":
         sparsity_ratio = check_sparsity(args, model, logger)
 
         logger.info("PPL Evaluation") 
-        for dataset in ["wikitext2", "ptb", "c4"]:
+        for dataset in ["wikitext2", "c4", "ptb"]:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
             )
             logger.info(f"Dataset: {dataset}")
-            llama_eval(args, model, testloader, DEV, dataset, logger)
+            llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3250,12 +3250,12 @@ if __name__ == "__main__":
         
         if args.eval_ppl:
             logger.info("PPL Evaluation") 
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger)
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3284,12 +3284,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation") 
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
         
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3318,12 +3318,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
         
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3358,12 +3358,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3391,12 +3391,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3425,12 +3425,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3461,12 +3461,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3495,12 +3495,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
         
         if args.save:    
             model.save_pretrained(args.save_model)
@@ -3520,12 +3520,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3555,12 +3555,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3624,12 +3624,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3658,12 +3658,12 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
         
         if args.eval_zero_shot:
             from eval import eval_zero_shot
@@ -3696,13 +3696,45 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "ptb", "c4"]:
+            for dataset in ["wikitext2", "c4", "ptb"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
-                llama_eval(args, model, testloader, DEV, dataset, logger) 
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
 
+    elif args.prune_method == "mar":
+        from prunellm.sparsegpt import SparseGPT
+        from prunellm.quant import Quantizer
+        from eval import llama_eval
+
+        logger.info("Pruning MAR...") 
+        tick = time.time()
+        llama_sequential_sparsegpt(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("Check sparisity ratio ...")
+        sparsity_ratio = check_sparsity(args, model, logger)
         
+        if args.eval_ppl:
+            logger.info("PPL Evaluation") 
+            for dataset in ["wikitext2", "c4", "ptb"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
+        if args.eval_zero_shot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+
+        if args.save:
+            model.save_pretrained(args.save_model)
+            tokenizer.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)

@@ -21,7 +21,7 @@ for sparsity_type in "unstructured" "2:4" "4:8"; do
                     --sparsity_ratio $sparsity_ratio \
                     --sparsity_type $sparsity_type \
                     --eval_ppl \
-                    --eval_zero_shot
+                    # --eval_zero_shot
             done
             ;;
         # "2:4"|"4:8")

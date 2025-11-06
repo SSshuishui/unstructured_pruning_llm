@@ -9,7 +9,7 @@ from utils.modelutils import *
 
 
 @torch.no_grad()
-def llama_eval(args, model, testenc, dev,  dataset: str, logger):
+def llama_eval(args, model, testenc, dev,  dataset: str, sparsity_ratio: float, logger):
     logger.info("Evaluating ...")
 
     testenc = testenc.input_ids
@@ -104,7 +104,7 @@ def llama_eval(args, model, testenc, dev,  dataset: str, logger):
         neg_log_likelihood = loss.float() * model.seqlen
         nlls.append(neg_log_likelihood)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
-    logger.info(f"Perplexity: {ppl.item():3f}")
+    logger.info(f"{dataset} - {sparsity_ratio} - {args.model.split('/')[-1]} - {args.prune_method} - {args.groupsize} Perplexity: {ppl.item():3f}")
 
     model.config.use_cache = use_cache
 
@@ -178,7 +178,8 @@ def eval_zero_shot(args, model, logger, task_list=["boolq","rte","hellaswag","wi
 
 
 # Function to evaluate perplexity (ppl) on a specified model
-def eval_ppl(model, tokenizer, dataset, device=torch.device("cuda:0")):
+def eval_ppl(model, tokenizer, dataset, logger, device=torch.device("cuda:0")):
+    logger.info("Evaluating ...")
     from utils.datautils import get_loaders
     # Get the test loader
     _, testloader = get_loaders(
@@ -189,7 +190,7 @@ def eval_ppl(model, tokenizer, dataset, device=torch.device("cuda:0")):
     with torch.no_grad():
         ppl = eval_ppl_dataset(model, testloader, 1, device)
         
-    return ppl 
+    logger.info(f"Perplexity: {ppl.item():3f}")
 
 # Function to evaluate perplexity (ppl) specifically on the wikitext dataset
 def eval_ppl_dataset(model, testenc, bs=1, device=None):
