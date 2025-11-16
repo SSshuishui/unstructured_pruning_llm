@@ -204,6 +204,7 @@ def llama_sequential_sparsegpt(args, model, dataloader, dev, logger, ratios=None
 
 
 def llama_sequential_wanda(args, model, dataloader, dev, logger, ratios=None):
+    from prunellm.MAR_utils_wanda import wanda_preprocess_gentle_adapted
     logger.info("Starting...")
 
     use_cache = model.config.use_cache 
@@ -288,6 +289,11 @@ def llama_sequential_wanda(args, model, dataloader, dev, logger, ratios=None):
         for name in subset:
             print(i, name)
             logger.info("Pruning ...")
+            
+            pre_dtype = subset[name].weight.data.dtype
+            subset[name].weight.data = wanda_preprocess_gentle_adapted(subset[name].weight.data, wanda_layers[name].scaler_row)
+            subset[name].weight.data = subset[name].weight.data.to(pre_dtype)
+
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wanda_layers[name].scaler_row.reshape((1,-1)))
 
             W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
@@ -794,117 +800,6 @@ def llama_sequential_DSnoT(args, model, dataloader, dev, logger):
     torch.cuda.empty_cache()
 
 
-def owl_layer_ratio_compute(args, model, dataloader, dev, logger):
-    logger.info("Starting...")
-
-    all_layer_ratio=[]
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-    layers = model.model.layers
-
-    model.model.embed_tokens = model.model.embed_tokens.to(dev)
-    model.model.norm = model.model.norm.to(dev)
-    layers[0] = layers[0].to(dev)
-
-    dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros(
-        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
-    )
-    cache = {"i": 0, "attention_mask": None}
-
-    class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
-            self.module = module
-
-        def forward(self, inp, **kwargs):
-            inps[cache["i"]] = inp
-            cache["i"] += 1
-            cache["attention_mask"] = kwargs["attention_mask"]
-            cache["position_ids"] = kwargs["position_ids"]
-            raise ValueError
-    layers[0] = Catcher(layers[0])
-
-    for batch in dataloader:
-        try:
-            model(batch[0].to(dev))
-        except ValueError:
-            pass
-    layers[0] = layers[0].module
-
-    layers[0] = layers[0].cpu()
-
-    outs = torch.zeros_like(inps)
-    attention_mask = cache["attention_mask"]
-    position_ids = cache["position_ids"]
-
-    logger.info("Ready.")
-
-    hf_device_map = model.hf_device_map
-    logger.info(f"hf_device_map: {hf_device_map}")
-
-    for i in range(len(layers)):
-        logger.info(f'================={i}==================')
-        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
-        layer = layers[i].to(hf_device)
-        inps = inps.to(hf_device)
-        position_ids = position_ids.to(hf_device)
-
-        subset = find_layers(layer)
-
-        wrapped_layers = {}
-        for name in subset:
-            wrapped_layers[name] = WrappedGPT(subset[name])
-
-        def add_batch(name):
-            def tmp(_, inp, out):
-                wrapped_layers[name].add_batch(inp[0].data, out.data)
-            return tmp
-
-        handles = []
-        for name in subset:
-            handles.append(subset[name].register_forward_hook(add_batch(name)))
-        for j in range(args.nsamples):
-            with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        for h in handles:
-            h.remove()
-
-        layer_wmetric=[]
-        for name in subset:
-            logger.info(f"pruning layer {i} name {name}")
-            W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
-            layer_wmetric.append(W_metric)
-
-        for j in range(args.nsamples):
-            with torch.no_grad():
-                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
-        inps, outs = outs, inps
-
-        layer_wmetric = torch.cat([torch.flatten(x.cpu()) for x in layer_wmetric])
-        
-        for out_ratio in [args.Hyper_m]:
-            out_ratio_layer=check_outlier_mean(layer_wmetric, out_ratio)
-            print("layer outlier ratio", out_ratio, out_ratio_layer)
-        all_layer_ratio.append(out_ratio_layer)
-
-    logger.info(f"before adjustment: {all_layer_ratio}")
-
-    all_layer_ratio=np.array(all_layer_ratio)
-    all_layer_ratio = ((all_layer_ratio - all_layer_ratio.min()) * (1/(all_layer_ratio.max() - all_layer_ratio.min()) * args.Lamda*2))
-    all_layer_ratio=all_layer_ratio - np.mean(all_layer_ratio) + (1-args.sparsity_ratio)
-    print(all_layer_ratio, np.mean(all_layer_ratio), np.max(all_layer_ratio), np.min(all_layer_ratio))
-    
-    logger.info(f"after adjustment: {all_layer_ratio}")
-
-    model.config.use_cache = use_cache 
-    del wrapped_layers, layer
-    del inps, outs
-    torch.cuda.empty_cache()
-    gc.collect()
-    return all_layer_ratio
-
-
 def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
     logger.info("Starting...")
 
@@ -1080,7 +975,7 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
                 prunen=args.prune_n, 
                 prunem=args.prune_m, 
                 percdamp=args.percdamp, 
-                blocksize=args.blocksize
+                groupsize=args.groupsize,
             )
             gpts[name].free()
 
@@ -1099,6 +994,7 @@ def llama_sequential_owl_sparsegpt(args, model, dataloader, dev, logger):
 
 
 def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
+    from prunellm.MAR_utils_wanda import wanda_preprocess_gentle_adapted
     logger.info("Starting...")
 
     all_layer_ratio=[]
@@ -1263,6 +1159,11 @@ def llama_sequential_owl_wanda(args, model, dataloader, dev, logger):
         
         for name in subset:
             print(f"pruning layer {i} name {name}")
+
+            pre_dtype = subset[name].weight.data.dtype
+            subset[name].weight.data = wanda_preprocess_gentle_adapted(subset[name].weight.data, wrapped_layers[name].scaler_row)
+            subset[name].weight.data = subset[name].weight.data.to(pre_dtype)
+
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
             layer_sparsity_ratio= 1-all_layer_ratio[i]
            
@@ -2671,7 +2572,7 @@ def llama_sequential_dlp_sparsegpt(args, model, dataloader, dev, logger):
                 prunen=args.prune_n, 
                 prunem=args.prune_m, 
                 percdamp=args.percdamp, 
-                blocksize=args.blocksize
+                groupsize=args.groupsize
             )
             gpts[name].free()
 
@@ -2690,6 +2591,7 @@ def llama_sequential_dlp_sparsegpt(args, model, dataloader, dev, logger):
 
 
 def llama_sequential_dlp_wanda(args, model, dataloader, dev, logger):
+    from prunellm.MAR_utils_wanda import wanda_preprocess_gentle_adapted
     logger.info("Starting...")
 
     all_layer_ratio=[]
@@ -2856,6 +2758,11 @@ def llama_sequential_dlp_wanda(args, model, dataloader, dev, logger):
         
         for name in subset:
             print(f"pruning layer {i} name {name}")
+            
+            pre_dtype = subset[name].weight.data.dtype
+            subset[name].weight.data = wanda_preprocess_gentle_adapted(subset[name].weight.data, wrapped_layers[name].scaler_row)
+            subset[name].weight.data = subset[name].weight.data.to(pre_dtype)
+
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
             layer_sparsity_ratio= 1-all_layer_ratio[i]
            
@@ -2909,6 +2816,153 @@ def llama_sequential_dlp_wanda(args, model, dataloader, dev, logger):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
+    torch.cuda.empty_cache()
+
+
+
+def llama_sequential_BaWA(args, model, dataloader, dev, logger, ratios=None):
+    logger.info("Starting...")
+
+    use_cache = model.config.use_cache 
+    model.config.use_cache = False 
+    layers = model.model.layers
+
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
+    layers[0] = layers[0].to(dev)
+
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    cache = {"i": 0, "attention_mask": None}
+
+    class Catcher(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, inp, **kwargs):
+            inps[cache["i"]] = inp
+            cache["i"] += 1
+            cache["attention_mask"] = kwargs["attention_mask"]
+            cache["position_ids"] = kwargs["position_ids"]
+            raise ValueError
+
+    layers[0] = Catcher(layers[0])
+    for batch in dataloader:
+        try:
+            model(batch[0].to(dev))
+        except ValueError:
+            pass
+    layers[0] = layers[0].module
+
+    layers[0] = layers[0].cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
+    torch.cuda.empty_cache()
+    
+    outs = torch.zeros_like(inps)
+    attention_mask = cache["attention_mask"]
+    position_ids = cache['position_ids']
+
+    logger.info('Ready.')
+
+    hf_device_map = model.hf_device_map
+    logger.info("hf_device_map: ", hf_device_map)
+
+    if ratios is None:
+        layer_num = len(find_layers(layers))
+        ratios = [args.sparsity_ratio for i in range(layer_num)]
+    
+    k=0
+    for i in range(len(layers)):
+        logger.info(f'================={i}==================')
+        hf_device = "cuda:0" if len(hf_device_map) == 1 and '' in hf_device_map else f"cuda:{hf_device_map[f'model.layers.{i}']}"
+        layer = layers[i].to(hf_device)
+        inps = inps.to(hf_device)
+        position_ids = position_ids.to(hf_device)
+
+        subset = find_layers(layer)
+
+        wanda_layers = {}
+        for name in subset:
+            wanda_layers[name] = WandaGPT(subset[name])
+        def add_batch(name):
+            def tmp(_, inp, out):
+                wanda_layers[name].add_batch(inp[0].data, out.data)
+            return tmp
+
+        handles = []
+        for name in subset:
+            handles.append(subset[name].register_forward_hook(add_batch(name)))
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        for h in handles:
+            h.remove()
+
+        theta1, theta2, theta3 = 0.42, 0.51, 0.38
+        for name in subset:
+            print(i, name)
+            logger.info("Pruning ...")
+
+            W = subset[name].weight.data
+            # 计算输入通道的L2范数 ||W_j||_2 ∈ (in_channels,)
+            input_norms = torch.norm(W, p=2, dim=0)
+            # 计算输出通道的L2范数 ||W_i||_2 ∈ (out_channels,)  
+            output_norms = torch.norm(W, p=2, dim=1)
+
+            # 输入通道归一化部分: |W_ij| * 1/||W_j||_2^θ1
+            input_norm_part = torch.abs(subset[name].weight.data) / (input_norms ** theta1).reshape(1, -1)
+            # 输出通道归一化部分: 1/||W_i||_2^θ2 * |W_ij|
+            output_norm_part = torch.abs(subset[name].weight.data) / (output_norms ** theta2).reshape(-1, 1)
+
+            W_metric = (input_norm_part + output_norm_part) * torch.sqrt(wanda_layers[name].scaler_row.reshape((1,-1))) ** theta3
+
+            W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
+            if args.prune_n != 0:
+                # structured n:m sparsity
+                for ii in range(W_metric.shape[1]):
+                    if ii % args.prune_m == 0:
+                        tmp = W_metric[:,ii:(ii+args.prune_m)].float()
+                        W_mask.scatter_(1,ii+torch.topk(tmp, args.prune_n, dim=1, largest=False)[1], True)
+            else:
+                sort_res = torch.sort(W_metric, dim=-1, stable=True)
+
+                if args.use_variant:
+                    # wanda variant 
+                    tmp_metric = torch.cumsum(sort_res[0], dim=1)
+                    sum_before = W_metric.sum(dim=1)
+
+                    alpha = 0.4
+                    alpha_hist = [0., 0.8]
+                    W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                    while (torch.abs(cur_sparsity - args.sparsity_ratio)>0.001) and (alpha_hist[1]-alpha_hist[0]>=0.001):
+                        if cur_sparsity > args.sparsity_ratio:
+                            alpha_new = (alpha + alpha_hist[0]) / 2.0
+                            alpha_hist[1] = alpha
+                        else:
+                            alpha_new = (alpha + alpha_hist[1]) / 2.0
+                            alpha_hist[0] = alpha
+
+                        alpha = alpha_new 
+                        W_mask, cur_sparsity = return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before)
+                    logger.info(f"alpha found {alpha} sparsity {cur_sparsity:.6f}")
+                else:
+                    # unstructured pruning
+                    indices = sort_res[1][:,:int(W_metric.shape[1]*ratios[k])]
+                    k += 1
+                    W_mask.scatter_(1, indices, True)
+
+            subset[name].weight.data[W_mask] = 0  ## set weights to zero 
+
+        for j in range(args.nsamples):
+            with torch.no_grad():
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, position_ids=position_ids)[0]
+        inps, outs = outs, inps
+
+    model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
 
 
@@ -3006,7 +3060,7 @@ if __name__ == "__main__":
         "--model", type=str, help="LlaMA model to load"
     )
     parser.add_argument(
-        "--dataset", type=str, choices=["wikitext2", "c4", "ptb"], help="Where to extract calibration data from.",
+        "--dataset", type=str, choices=["wikitext2", "c4"], help="Where to extract calibration data from.",
     )
     parser.add_argument(
         "--seed", type=int, default=0, help="Seed for sampling the calibration data."
@@ -3064,10 +3118,10 @@ if __name__ == "__main__":
         "--eval_ppl", action="store_true"
     )
     parser.add_argument(
-        "--eval_zero_shot", action="store_true"
+        "--eval_zeroshot", action="store_true"
     )
     parser.add_argument(
-        "--lm_eval_batch_size", type=int, default=16
+        "--lm_eval_batch_size", type=int, default=8
     )
 
     # For DSnoT
@@ -3185,14 +3239,14 @@ if __name__ == "__main__":
         
         if args.eval_ppl:
             logger.info("PPL Evaluation") 
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3216,14 +3270,14 @@ if __name__ == "__main__":
         sparsity_ratio = check_sparsity(args, model, logger)
 
         logger.info("PPL Evaluation") 
-        for dataset in ["wikitext2", "c4", "ptb"]:
+        for dataset in ["wikitext2", "c4"]:
             dataloader, testloader = get_loaders(
                 dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
             )
             logger.info(f"Dataset: {dataset}")
             llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3250,14 +3304,14 @@ if __name__ == "__main__":
         
         if args.eval_ppl:
             logger.info("PPL Evaluation") 
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3284,14 +3338,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation") 
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
         
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3318,14 +3372,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
         
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3358,14 +3412,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3391,14 +3445,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3425,14 +3479,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3461,14 +3515,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3495,7 +3549,7 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
@@ -3520,14 +3574,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3555,14 +3609,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3624,14 +3678,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3658,14 +3712,14 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
         
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     
@@ -3696,13 +3750,59 @@ if __name__ == "__main__":
 
         if args.eval_ppl:
             logger.info("PPL Evaluation")    
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
 
+        if args.eval_zeroshot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+
+        if args.save:
+            model.save_pretrained(args.save_model)
+            tokenizer.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
+
+    elif args.prune_method == "BaWA":
+        from prunellm.wanda import WandaGPT
+        from eval import llama_eval
+
+        logger.info("Pruning BaWA ...") 
+        tick = time.time()
+        llama_sequential_BaWA(args, model, dataloader, DEV, logger)
+        logger.info(f"Total time: {time.time() - tick}")
+
+        logger.info("Check sparisity ratio ...")
+        sparsity_ratio = check_sparsity(args, model, logger)
+
+        if args.eval_ppl:
+            logger.info("PPL Evaluation") 
+            for dataset in ["wikitext2", "c4"]:
+                dataloader, testloader = get_loaders(
+                    dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
+                )
+                logger.info(f"Dataset: {dataset}")
+                llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger) 
+        
+        if args.eval_zeroshot:
+            from eval import eval_zero_shot
+            logger.info("zero_shot evaluation")
+    
+            task_list = ["copa", "piqa", "rte", "boolq", "hellaswag", "winogrande", "arc_easy", "arc_challenge", "openbookqa"]
+            num_shot = 0
+            eval_zero_shot(args, model, logger, task_list, num_shot)
+
+        if args.save:    
+            model.save_pretrained(args.save_model)
+            tokenizer.save_pretrained(args.save_model)
+            print("save model at: ", args.save_model)
 
     elif args.prune_method == "mar":
         from prunellm.sparsegpt import SparseGPT
@@ -3719,14 +3819,14 @@ if __name__ == "__main__":
         
         if args.eval_ppl:
             logger.info("PPL Evaluation") 
-            for dataset in ["wikitext2", "c4", "ptb"]:
+            for dataset in ["wikitext2", "c4"]:
                 dataloader, testloader = get_loaders(
                     dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen
                 )
                 logger.info(f"Dataset: {dataset}")
                 llama_eval(args, model, testloader, DEV, dataset, sparsity_ratio, logger)
 
-        if args.eval_zero_shot:
+        if args.eval_zeroshot:
             from eval import eval_zero_shot
             logger.info("zero_shot evaluation")
     

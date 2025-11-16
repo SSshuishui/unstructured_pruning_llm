@@ -19,6 +19,8 @@ class WrappedGPT:
         self.layer_id = layer_id 
         self.layer_name = layer_name
 
+        self.X = None
+
     def add_batch(self, inp, out):
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
@@ -33,3 +35,5 @@ class WrappedGPT:
 
         inp = inp.type(torch.float32)
         self.scaler_row += torch.norm(inp, p=2, dim=1) ** 2  / self.nsamples
+
+        self.X = inp.t().float()

@@ -52,8 +52,8 @@ class SparseGPT:
         self.H += inp.matmul(inp.t())
 
     def fasterprune(
-        self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01, mar=False, groupsize=-1
-    ):
+        self, sparsity, prunen=0, prunem=0, blocksize=128, percdamp=.01, mar=True, groupsize=-1
+    ):        
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
@@ -62,13 +62,11 @@ class SparseGPT:
         W = W.float()
 
         if mar:
-            if groupsize != -1:
+            if groupsize == -1:
                 print("per layer!")
-                W = W_gradient_preprocess_pruning(W, self.X, self.dev)
-            else:
-                print("per group!")
-                W = W_gradient_preprocess_pruning_per_group(W, self.X, self.dev, groupsize=groupsize)
-
+                W = prune_preprocess_proximal_optimized(W, self.X, self.dev)
+            
+            
         if hasattr(self, 'quantizer'):
             if not self.quantizer.ready():
                 self.quantizer.find_params(W, weight=True)

@@ -1,127 +1,178 @@
 import torch
+import torch.nn as nn
 
-def W_gradient_preprocess_pruning(W, X, device, lambda_reg=0.01, lr=0.001, n_iter=200):
+
+def prune_preprocess_sparsegpt_aligned(W, X, device, lambda_reg=0.001):
     """
-    Simplified gradient-based preprocessing for pruning
+    与SparseGPT目标对齐的预处理
+    核心思想：让Hessian矩阵更接近对角，便于剪枝
     """
-    W_hat = W.clone().T
+    W_orig = W.clone()
+    out_features, in_features = W.shape
     
-    m, n = X.shape
-
-    U, s, Vt = torch.linalg.svd(X)
-    del X
-    s /= torch.max(s)
-    S = torch.diag(s)
-    if m > n:
-        U = U[:, :n]
-    elif m < n:
-        Vt = Vt[:m, :]
-
-    X = torch.mm(torch.mm(U, S), Vt)
-    XtX = torch.matmul(X.T, X).to(device)
-
-    # Compute feature norms and precompute matrices
     with torch.no_grad():
-        feature_norms = torch.norm(X, dim=0)  # (d, )
-        feature_norms = feature_norms.to(device)
-        D_sq = feature_norms ** 2  # (d, )
+        # 计算Hessian近似 (X^T X)
+        H = X.T @ X  # [in_features, in_features]
         
-    
-    for i in range(n_iter):
-        # Manual gradient computation
-        # Gradient of data term: 2 * X^T X (W_hat - W)
-        grad_data = 2 * torch.matmul(XtX, (W_hat - W.T))
+        # 计算重要性分数（与SparseGPT一致）
+        X_norms = torch.norm(X, p=2, dim=0)
+        diag_H = torch.diag(H)
         
-        # Gradient of regularization term: 2 * lambda_reg * D^2 W_hat
-        grad_reg = 2 * lambda_reg * (D_sq.unsqueeze(1) * W_hat)
+        # SparseGPT使用的重要性度量
+        importance = torch.abs(W) / torch.sqrt(diag_H.unsqueeze(0) + 1e-8)
         
-        # Total gradient
-        grad_total = grad_data + grad_reg
+        # 保守的权重调整：基于Hessian对角化的思想
+        # 目标：让 W / sqrt(diag(H)) 的分布更易区分
         
-        # Gradient descent step
-        W_hat = W_hat - lr * grad_total
-    
-    return W_hat.T
+        # 计算每行的统计量
+        row_importance = importance.mean(dim=1)  # 每个输出通道的平均重要性
+        
+        # 非常保守的调整：仅对极端值做微小调整
+        mean_imp = row_importance.mean()
+        std_imp = row_importance.std()
+        
+        scaling_factors = torch.ones(out_features, device=device)
+        for i in range(out_features):
+            z_score = (row_importance[i] - mean_imp) / (std_imp + 1e-8)
+            # 只对显著偏离的通道做微小调整
+            if abs(z_score) > 2.0:  # 超过2个标准差
+                adjustment = torch.tanh(z_score * 0.1) * 0.02  # 最大±2%
+                scaling_factors[i] = 1.0 + adjustment
+        
+        print(f"Scaling factors - min: {scaling_factors.min():.4f}, max: {scaling_factors.max():.4f}, "
+              f"mean: {scaling_factors.mean():.4f}")
+        
+        W_processed = W * scaling_factors.unsqueeze(1)
+        
+        # 验证输出变化
+        XW_orig = X @ W_orig.T
+        XW_processed = X @ W_processed.T
+        rel_diff = torch.norm(XW_processed - XW_orig) / torch.norm(XW_orig)
+        
+        if rel_diff > 0.01:
+            print(f"Output change too large: {rel_diff:.4f}, reverting")
+            return W_orig
+        
+    return W_processed
 
 
-def W_gradient_preprocess_pruning_per_group(W, X, device, groupsize=128, lambda_reg=0.01, lr=0.001, n_iter=200):
+
+def prune_preprocess_proximal(W, X, device, lambda_reg=0.005):
     """
-    Group-wise preprocessing for pruning - applies regularization per output channel group
-    
-    Parameters:
-    W: (d, m) weight matrix
-    X: (n, d) input data
-    groupsize: size of each group along output dimension
-    lambda_reg: regularization strength
-    lr: learning rate
-    n_iter: number of iterations
+    基于Proximal算子的理论方法
     """
-    W_hat = W.clone().T  # (m, d)
+    W_orig = W.clone()
     
-    m, n = X.shape
-
-    # SVD compression (same as your original)
-    U, s, Vt = torch.linalg.svd(X)
-    del X
-    s /= torch.max(s)
-    S = torch.diag(s)
-    if m > n:
-        U = U[:, :n]
-    elif m < n:
-        Vt = Vt[:m, :]
-
-    X = torch.mm(torch.mm(U, S), Vt)
-    XtX = torch.matmul(X.T, X).to(device)
-
-    # Compute feature norms
     with torch.no_grad():
-        feature_norms = torch.norm(X, dim=0)  # (d, )
-        feature_norms = feature_norms.to(device)
-        D_sq = feature_norms ** 2  # (d, )
-    
-    # Precompute group information
-    n_output, n_input = W_hat.shape  # (m, d)
-    n_groups = (n_output + groupsize - 1) // groupsize
-    
-    for i in range(n_iter):
-        # Gradient of data term: 2 * X^T X (W_hat - W.T)
-        grad_data = 2 * torch.matmul(XtX, (W_hat - W.T))
+        n, m = W.shape  # n: output_features, m: input_features
+
+        H = X.T @ X  # [m, m]
         
-        # Group-wise regularization gradient
-        grad_reg = torch.zeros_like(W_hat)
+        # 理论目标函数：
+        # min_{W'} 0.5 * ||XW - XW'||_F^2 + λ * φ(W')
         
-        for group_idx in range(n_groups):
-            start_idx = group_idx * groupsize
-            end_idx = min((group_idx + 1) * groupsize, n_output)
+        X_norms = torch.norm(X, p=2, dim=0)  # [m]
+        diag_H = torch.diag(H)  # [m]
+        
+        # 构建正则化权重: 重要性低的权重惩罚更大
+        reg_weights = X_norms / torch.sqrt(diag_H + 1e-8)  # [m]
+        
+        # Proximal gradient descent
+        W_tilde = W.clone()
+        L = torch.norm(X, 2) ** 2  # Lipschitz常数
+        
+        for _ in range(5):
+            # 正确计算梯度: ∇f(W') = X^T(XW' - XW)
+            # X: [batch_size, m], W: [n, m], W_tilde: [n, m]
+            residual = X @ W_tilde.T - X @ W.T  # [batch_size, n]
+            grad = X.T @ residual  # [m, n]
+            grad = grad.T  # [n, m] - 转置回与W_tilde相同的形状
             
-            # Extract group weights: (group_size, d)
-            group_weights = W_hat[start_idx:end_idx, :]
+            # 梯度步
+            W_temp = W_tilde - grad / L
             
-            if group_weights.numel() == 0:
-                continue
-                
-            # Compute group importance scores (per output channel)
-            # This is where we mimic MagR's group-wise regularization
-            with torch.no_grad():
-                # Method 1: Use feature norms to weight input dimensions
-                group_importance = torch.norm(group_weights * feature_norms.unsqueeze(0), dim=1)  # (group_size,)
-                group_importance = torch.clamp(group_importance, min=1e-8)
-                
-                # Normalize importance within group
-                importance_weights = group_importance / torch.max(group_importance)
-                
-                # Invert for regularization: less important channels get more regularization
-                reg_strength = (1.0 - importance_weights).unsqueeze(1)  # (group_size, 1)
+            # Proximal操作：针对剪枝的软阈值
+            thresholds = lambda_reg * reg_weights.unsqueeze(0) / L  # [1, m] -> [n, m]
             
-            # Apply group-aware regularization
-            # Channels with lower importance get stronger regularization
-            group_grad_reg = 2 * lambda_reg * reg_strength * (D_sq.unsqueeze(0) * group_weights)
-            grad_reg[start_idx:end_idx, :] = group_grad_reg
+            W_tilde = torch.sign(W_temp) * torch.clamp(
+                torch.abs(W_temp) - thresholds, min=0
+            )
         
-        # Total gradient
-        grad_total = grad_data + grad_reg
-        
-        # Gradient descent step
-        W_hat = W_hat - lr * grad_total
+        return W_tilde
+
+
+
+def power_iteration(matrix, num_iterations=20):
+    """使用幂迭代法快速估计矩阵的最大特征值"""
+    vector = torch.randn(matrix.shape[1], 1, device=matrix.device)
+    for _ in range(num_iterations):
+        matrix_vector = matrix @ vector
+        vector_norm = torch.norm(matrix_vector)
+        vector = matrix_vector / vector_norm
     
-    return W_hat.T
+    eigenvalue = (vector.T @ matrix @ vector) / (vector.T @ vector)
+    return eigenvalue.item()
+
+def prune_preprocess_proximal_optimized(
+    W, 
+    X, 
+    device, 
+    lambda_reg=0.001, 
+    n_iter=100
+):
+    """
+    优化后的基于Proximal算子的剪枝预处理方法
+    """
+    print("--- Starting OPTIMIZED PGD preprocessing for SparseGPT ---")
+    W_orig = W.clone().to(device).float()
+    X = X.to(device).float()
+    n, m = W.shape
+
+    with torch.no_grad():
+        H = X.T @ X  # [m, m]
+
+        # 1. 改进的正则化权重 (惩罚与重要性成反比)
+        diag_H = torch.diag(H)
+        # 数值稳定性处理
+        safe_diag_H = torch.clamp(diag_H, min=1e-8)
+        
+        reg_weights = torch.sqrt(safe_diag_H)
+        # 归一化，使lambda的尺度更可控
+        reg_weights = reg_weights / torch.mean(reg_weights) if torch.mean(reg_weights) > 0 else reg_weights
+
+        # 2. 改进的Lipschitz常数计算 (更准确且高效)
+        print("Estimating Lipschitz constant (max eigenvalue of H)...")
+        L = power_iteration(H)
+        if L <= 0: L = 1.0 # 备用值
+        step_size = 1.0 / L
+        print(f"Lipschitz constant L ≈ {L:.4f}, using step_size ≈ {step_size:.6f}")
+
+        # 3. PGD迭代 (增加迭代次数)
+        W_tilde = W_orig.clone()
+        
+        # 预计算梯度不变的部分
+        XtXW_orig_T = H @ W_orig.T # [m, n]
+        
+        for i in range(n_iter):
+            # 正确计算梯度: ∇f(W') = (W' @ H) - (W_orig @ H)
+            grad_T = H @ W_tilde.T - XtXW_orig_T
+            grad = grad_T.T # 转置回 [n, m]
+            
+            # 梯度步
+            W_temp = W_tilde - step_size * grad
+            
+            # Proximal操作
+            thresholds = step_size * lambda_reg * reg_weights.unsqueeze(0)
+            
+            W_tilde = torch.sign(W_temp) * torch.clamp(
+                torch.abs(W_temp) - thresholds, min=0
+            )
+
+        # 验证输出变化
+        XW_orig_T = X @ W_orig.T
+        XW_tilde_T = X @ W_tilde.T
+        rel_diff = torch.norm(XW_tilde_T - XW_orig_T) / (torch.norm(XW_orig_T) + 1e-9)
+        print(f"--- PGD finished. Relative Output Change: {rel_diff:.4f} ---")
+
+        return W_tilde
+
